@@ -62,36 +62,77 @@ $officialLauncher = Join-Path $workspace 'Start-Codex-Official.ps1'
 $bridgePidFile = Join-Path $workspace 'bridge.pid'
 $bridgeLogFile = Join-Path $workspace 'bridge.log'
 
+# Auto-detect available PowerShell host so we work on systems that only have
+# Windows PowerShell 5.1 (powershell.exe) installed, not pwsh. Avoid the `?.`
+# null-conditional operator here -- it is PS7+ only, and we want this file to
+# parse cleanly under Windows PowerShell 5.1 as well.
+$psHost = $null
+$cmd = Get-Command pwsh -ErrorAction SilentlyContinue
+if ($cmd) { $psHost = $cmd.Source }
+if (-not $psHost) {
+    $cmd = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($cmd) { $psHost = $cmd.Source }
+}
+if (-not $psHost) {
+    throw "Neither pwsh nor powershell was found on PATH. Install PowerShell 7+ (recommended) or run from a Windows PowerShell session."
+}
+Write-Host "[verify] using PowerShell host: $psHost" -ForegroundColor Gray
+
+function Strip-PSComments {
+    param([string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    # Drop block comments <# ... #> first (non-greedy, multiline).
+    $noBlock = [regex]::Replace($Text, '(?s)<#.*?#>', '')
+    # Then drop single-line # comments. We deliberately keep lines that contain
+    # a # *inside a string* (e.g. "http://...#foo") -- a strict tokenizer is
+    # overkill here, so we only strip lines whose trimmed text starts with '#'.
+    $kept = New-Object System.Collections.Generic.List[string]
+    foreach ($line in ($noBlock -split "`r?`n")) {
+        if ($line.TrimStart().StartsWith('#')) { continue }
+        $kept.Add($line)
+    }
+    return ($kept -join "`n")
+}
+
 # ---------------- 7. official launcher static audit ----------------
+# We only flag OmniRoute references that appear in *executable* PowerShell,
+# not in comments / docstrings. The official launcher's docstring legitimately
+# describes what it does NOT do, which would otherwise trip this check.
 if (Test-Path -LiteralPath $officialLauncher) {
-    $officialText = Get-Content -LiteralPath $officialLauncher -Raw
+    $officialRaw = Get-Content -LiteralPath $officialLauncher -Raw
+    $officialCode = Strip-PSComments -Text $officialRaw
     $pollutionPatterns = @(
         'OMNIROUTE_',
         'CODEX_BRIDGE_',
         'CODEX_ELECTRON_USER_DATA_PATH',
+        'ELECTRON_USER_DATA_DIR',
         'omniroute_bridge',
         'codex-openai-omniroute-bridge',
         '.codex-omniroute-home'
     )
     $hits = @()
     foreach ($pat in $pollutionPatterns) {
-        if ($officialText -match [regex]::Escape($pat)) { $hits += $pat }
+        if ($officialCode -match [regex]::Escape($pat)) { $hits += $pat }
     }
     if ($hits.Count -eq 0) {
-        Add-Result 'official-launcher-clean' 'PASS' 'no OmniRoute references in Start-Codex-Official.ps1'
+        Add-Result 'official-launcher-clean' 'PASS' 'no OmniRoute references in executable code of Start-Codex-Official.ps1'
     } else {
-        Add-Result 'official-launcher-clean' 'FAIL' ("OmniRoute references found: " + ($hits -join ', '))
+        Add-Result 'official-launcher-clean' 'FAIL' ("OmniRoute references found in executable code: " + ($hits -join ', '))
     }
 } else {
     Add-Result 'official-launcher-clean' 'FAIL' "missing: $officialLauncher"
 }
 
 # ---------------- 6. global config not polluted ----------------
+# NOTE: this checks the *state* of the user's machine, not what this launcher
+# wrote. The OmniRoute launchers here never write to %USERPROFILE%\.codex.
+# If this FAILs the operator likely set the override manually in a previous
+# experiment -- they should remove it for a clean baseline.
 $globalConfig = Join-Path $env:USERPROFILE '.codex\config.toml'
 if (Test-Path -LiteralPath $globalConfig) {
     $globalText = Get-Content -LiteralPath $globalConfig -Raw
     if ($globalText -match 'model_provider\s*=\s*"omniroute_bridge"') {
-        Add-Result 'global-config-clean' 'FAIL' "global config has model_provider = `"omniroute_bridge`""
+        Add-Result 'global-config-clean' 'FAIL' "global $globalConfig already contains model_provider=`"omniroute_bridge`" -- this launcher did not write it, but you should remove it manually for a clean baseline."
     } else {
         Add-Result 'global-config-clean' 'PASS' "global $globalConfig has no active OmniRoute provider override"
     }
@@ -110,7 +151,7 @@ if (Test-Path -LiteralPath $workspaceLocalConfig) {
 # ---------------- 8. official DryRun does not spawn helpers ----------------
 if (Test-Path -LiteralPath $officialLauncher) {
     $nodeBefore = @(Get-Process -Name 'node' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-    & pwsh -NoProfile -File $officialLauncher -DryRun *> $null 2>&1
+    & $psHost -NoProfile -File $officialLauncher -DryRun *> $null 2>&1
     Start-Sleep -Milliseconds 250
     $nodeAfter = @(Get-Process -Name 'node' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     $newPids = $nodeAfter | Where-Object { $nodeBefore -notcontains $_ }
@@ -130,7 +171,8 @@ if (-not (Test-Path -LiteralPath $omniLauncher)) {
 
 Write-Host "`n[verify] starting OmniRoute launcher with -NoCodex ..." -ForegroundColor Cyan
 try {
-    & pwsh -NoProfile -File $omniLauncher -NoCodex -BridgePort $BridgePort -RuntimeHome $RuntimeHome
+    & $psHost -NoProfile -File $omniLauncher -NoCodex -BridgePort $BridgePort -RuntimeHome $RuntimeHome
+    if ($LASTEXITCODE -ne 0) { throw "launcher exited with code $LASTEXITCODE" }
     Add-Result 'omniroute-launch' 'PASS' '-NoCodex succeeded'
 } catch {
     Add-Result 'omniroute-launch' 'FAIL' $_.Exception.Message

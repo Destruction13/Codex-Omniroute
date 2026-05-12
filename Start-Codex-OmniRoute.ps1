@@ -131,35 +131,46 @@ function Find-FreePort {
 
 function New-IsolatedRuntimeHome {
     param([string]$Root, [switch]$Reset)
-    $abs = (Resolve-Path -LiteralPath (Split-Path -Parent $Root) -ErrorAction SilentlyContinue)
-    if (-not $abs) { $abs = (Get-Location).Path }
-    $full = if ([System.IO.Path]::IsPathRooted($Root)) { $Root } else { Join-Path (Get-Location).Path $Root }
+
+    # Absolutize the runtime home root. The default is a relative path like
+    # '.codex-omniroute-home' -- Resolve-Path -LiteralPath '' would be a
+    # parameter-binding error (not suppressible by -ErrorAction), so we build
+    # the absolute path ourselves rather than going through Split-Path.
+    $full = if ([System.IO.Path]::IsPathRooted($Root)) {
+        $Root
+    } else {
+        Join-Path (Get-Location).Path $Root
+    }
 
     if ($Reset -and (Test-Path -LiteralPath $full)) {
         Write-Host "[omniroute] reset: removing $full"
         Remove-Item -LiteralPath $full -Recurse -Force
     }
 
-    $sub = @(
-        $full,
-        (Join-Path $full 'HOME'),
-        (Join-Path $full 'AppData\Roaming'),
-        (Join-Path $full 'AppData\Local'),
-        (Join-Path $full 'AppData\Local\Temp'),
-        (Join-Path $full 'codex')
-    )
-    foreach ($d in $sub) {
+    # Windows-consistent layout: APPDATA / LOCALAPPDATA / TEMP all sit *under*
+    # the isolated USERPROFILE, the way they do on a real machine. Codex's
+    # Electron shell expects APPDATA == USERPROFILE\AppData\Roaming; splitting
+    # them across siblings tends to make the GUI exit silently.
+    $profileRoot   = Join-Path $full 'profile'
+    $appDataRoot   = Join-Path $profileRoot 'AppData\Roaming'
+    $localAppRoot  = Join-Path $profileRoot 'AppData\Local'
+    $tempRoot      = Join-Path $localAppRoot 'Temp'
+    $codexHomeRoot = Join-Path $full 'codex'
+    $electronData  = Join-Path $localAppRoot 'OpenAI\Codex-OmniRoute'
+
+    foreach ($d in @($full, $profileRoot, $appDataRoot, $localAppRoot, $tempRoot, $codexHomeRoot, $electronData)) {
         if (-not (Test-Path -LiteralPath $d)) {
             New-Item -ItemType Directory -Path $d -Force | Out-Null
         }
     }
     return [pscustomobject]@{
-        Root      = $full
-        Home      = (Join-Path $full 'HOME')
-        AppData   = (Join-Path $full 'AppData\Roaming')
-        LocalApp  = (Join-Path $full 'AppData\Local')
-        Temp      = (Join-Path $full 'AppData\Local\Temp')
-        CodexHome = (Join-Path $full 'codex')
+        Root         = $full
+        Home         = $profileRoot
+        AppData      = $appDataRoot
+        LocalApp     = $localAppRoot
+        Temp         = $tempRoot
+        CodexHome    = $codexHomeRoot
+        ElectronData = $electronData
     }
 }
 
@@ -293,19 +304,42 @@ $exe = Resolve-CodexExecutable
 $officialHome = Get-OfficialCodexHome
 $officialConfig = Join-Path $officialHome 'config.toml'
 
-$port = Find-FreePort -Preferred $BridgePort
 $runtime = New-IsolatedRuntimeHome -Root $RuntimeHome -Reset:$Reset
-
 Copy-MinimalSeed -OfficialHome $officialHome -IsolatedCodexHome $runtime.CodexHome
+
+# Bridge PID/log live in the workspace, NOT in the isolated runtime home.
+$bridgePid = Join-Path $workspace 'bridge.pid'
+$bridgeLog = Join-Path $workspace 'bridge.log'
+
+# Reap any previous workspace-managed bridge before starting a new one.
+# Otherwise repeated launches leak listeners (one per attempted port).
+if (Test-Path -LiteralPath $bridgePid) {
+    $oldPid = (Get-Content -LiteralPath $bridgePid -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($oldPid -match '^\d+$') {
+        $oldProc = Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue
+        if ($oldProc -and $oldProc.ProcessName -match '^node') {
+            Write-Host "[omniroute] stopping previous bridge pid=$oldPid"
+            try {
+                Stop-Process -Id ([int]$oldPid) -Force -ErrorAction Stop
+                Start-Sleep -Milliseconds 400
+            } catch {
+                Write-Warning "[omniroute] failed to stop previous bridge pid=$oldPid : $($_.Exception.Message)"
+            }
+        }
+    }
+    Remove-Item -LiteralPath $bridgePid -Force -ErrorAction SilentlyContinue
+}
+
+# Pick a free port AFTER cleaning up any previous bridge so the preferred port
+# is usually still available.
+$port = Find-FreePort -Preferred $BridgePort
+
+# Now write the isolated config with the actual chosen port.
 Write-IsolatedConfig `
     -IsolatedConfigPath (Join-Path $runtime.CodexHome 'config.toml') `
     -OfficialConfigPath $officialConfig `
     -BridgePort $port `
     -ProjectPath $workspace
-
-# Bridge PID/log live in the workspace, NOT in the isolated runtime home.
-$bridgePid = Join-Path $workspace 'bridge.pid'
-$bridgeLog = Join-Path $workspace 'bridge.log'
 
 # Per-process env overrides for the bridge child. ProcessStartInfo.Environment
 # is pre-populated with the parent's environment when UseShellExecute=$false,
@@ -339,8 +373,10 @@ if ($DryRun) {
             TEMP                          = $runtime.Temp
             TMP                           = $runtime.Temp
             CODEX_HOME                    = $runtime.CodexHome
-            CODEX_ELECTRON_USER_DATA_PATH = (Join-Path $runtime.LocalApp 'OpenAI\Codex-OmniRoute')
+            CODEX_ELECTRON_USER_DATA_PATH = $runtime.ElectronData
+            ELECTRON_USER_DATA_DIR        = $runtime.ElectronData
         }
+        CodexCliArgs        = @("--user-data-dir=$($runtime.ElectronData)")
         DryRun              = $true
     } | Format-List
     exit 0
@@ -395,7 +431,15 @@ if ($NoCodex) {
 }
 
 # Isolated environment for the Codex GUI process.
-$codexEnv = @{
+#
+# IMPORTANT: we set these on the *current PowerShell process* and then call
+# Start-Process. ProcessStartInfo.Environment-based overrides were dropping the
+# Electron shell during testing -- using Start-Process lets Codex.exe inherit
+# the full parent environment (PATH, SystemRoot, ProgramFiles, ComSpec,
+# PathExt, ...) plus our overrides, which is what the official Start Menu
+# launch sees. We restore the prior env values immediately after start; the
+# child process keeps its CreateProcess-time snapshot.
+$codexEnv = [ordered]@{
     HOME                          = $runtime.Home
     USERPROFILE                   = $runtime.Home
     APPDATA                       = $runtime.AppData
@@ -403,16 +447,48 @@ $codexEnv = @{
     TEMP                          = $runtime.Temp
     TMP                           = $runtime.Temp
     CODEX_HOME                    = $runtime.CodexHome
-    CODEX_ELECTRON_USER_DATA_PATH = (Join-Path $runtime.LocalApp 'OpenAI\Codex-OmniRoute')
+    # Belt-and-suspenders: three different env vars Electron / Codex may read.
+    CODEX_ELECTRON_USER_DATA_PATH = $runtime.ElectronData
+    ELECTRON_USER_DATA_DIR        = $runtime.ElectronData
 }
 
-$codexStart = New-Object System.Diagnostics.ProcessStartInfo
-$codexStart.FileName = $exe
-$codexStart.WorkingDirectory = $workspace
-$codexStart.UseShellExecute = $false
-foreach ($kv in $codexEnv.GetEnumerator()) { $codexStart.Environment[$kv.Key] = $kv.Value }
-# Preserve PATH from the parent so the binary can still find side-by-side DLLs.
-$codexStart.Environment['PATH'] = $env:PATH
+# Also pass --user-data-dir explicitly as a Chromium/Electron CLI flag --
+# this is the canonical mechanism for forking userData, and it works even
+# if the env-var names above aren't the ones Codex actually reads.
+$codexArgs = @("--user-data-dir=$($runtime.ElectronData)")
 
-$codexProc = [System.Diagnostics.Process]::Start($codexStart)
-Write-Host "[omniroute] launched Codex.exe pid=$($codexProc.Id) with isolated runtime $($runtime.CodexHome)"
+$prevEnv = @{}
+foreach ($kv in $codexEnv.GetEnumerator()) {
+    $prevEnv[$kv.Key] = [System.Environment]::GetEnvironmentVariable($kv.Key, 'Process')
+    [System.Environment]::SetEnvironmentVariable($kv.Key, [string]$kv.Value, 'Process')
+}
+
+$codexProc = $null
+try {
+    $codexProc = Start-Process -FilePath $exe -ArgumentList $codexArgs -WorkingDirectory $workspace -PassThru
+} finally {
+    foreach ($kv in $prevEnv.GetEnumerator()) {
+        [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, 'Process')
+    }
+}
+
+if (-not $codexProc) {
+    Write-Error "[omniroute] Start-Process returned no process for Codex.exe at $exe"
+    exit 1
+}
+
+Write-Host ("[omniroute] launched Codex.exe pid={0} userdata={1}" -f $codexProc.Id, $runtime.ElectronData)
+Write-Host "[omniroute] CLI args: $($codexArgs -join ' ')"
+Write-Host "[omniroute] isolated CODEX_HOME: $($runtime.CodexHome)"
+
+# Quick liveness check -- a healthy Electron desktop process should still be
+# alive a second or two after launch. If not, give the operator a useful hint.
+Start-Sleep -Seconds 2
+$codexProc.Refresh()
+if ($codexProc.HasExited) {
+    Write-Warning ("[omniroute] Codex.exe (pid={0}) exited within 2s with code {1}." -f $codexProc.Id, $codexProc.ExitCode)
+    Write-Warning "[omniroute]   Common causes: stale isolated profile (try -Reset), or env-var collision."
+    Write-Warning "[omniroute]   Check Windows Event Viewer -> Application logs for Codex.exe entries."
+} else {
+    Write-Host "[omniroute] Codex.exe alive after 2s (pid=$($codexProc.Id))."
+}
