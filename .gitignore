@@ -1,0 +1,48 @@
+# Codex OmniRoute — never commit runtime/auth state
+
+# Isolated runtime homes (per-workspace Codex profile)
+.codex-omniroute-home/
+.codex-omniroute-home-*/
+
+# Bridge runtime artifacts
+bridge.pid
+bridge.log
+*.pid
+*.log
+*.log.*
+*.bak
+*.backup
+
+# Local provider config (real secrets live here)
+omniroute-provider.json
+.env
+.env.*
+!.env.example
+
+# Official Codex auth or profile fragments accidentally copied in
+auth.json
+auth.json.bak
+models_cache.json
+installation_id
+sessions/
+threads/
+history/
+storage/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Optional helper output
+tools/__pycache__/
+*.pyc
+mock-transcribe-upstream.log

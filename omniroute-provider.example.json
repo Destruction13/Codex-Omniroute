@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy to omniroute-provider.json and fill in your own values. NEVER commit omniroute-provider.json.",
+  "base_url": "http://127.0.0.1:20128/v1",
+  "api_key": "REDACTED_PUT_YOUR_OMNIROUTE_KEY_HERE",
+  "model_prefix": "cx/",
+  "default_model": "gpt-5.4",
+  "headers": {
+    "x-codex-omniroute-client": "codex-omniroute-bridge"
+  },
+  "gpt55_pin": {
+    "_comment": "Optional. Only used when OMNIROUTE_PIN_55=1 in the environment.",
+    "enabled": false,
+    "connection_id": "REDACTED_PUT_YOUR_GPT55_CONNECTION_ID_HERE",
+    "aliases": ["gpt-5.5", "gpt-5.5-thinking", "gpt-5.5-mini"]
+  }
+}

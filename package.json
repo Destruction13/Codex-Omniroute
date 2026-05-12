@@ -1,0 +1,16 @@
+{
+  "name": "codex-omniroute",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local OpenAI-compatible bridge that reroutes Codex desktop's main reasoning calls through OmniRoute while keeping the official Microsoft Store Codex app as the unchanged shell.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "scripts": {
+    "bridge": "node ./codex-openai-omniroute-bridge.mjs",
+    "mock-transcribe": "node ./mock-transcribe-upstream.mjs",
+    "check": "node --check ./codex-openai-omniroute-bridge.mjs && node --check ./mock-transcribe-upstream.mjs"
+  }
+}
