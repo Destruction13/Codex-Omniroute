@@ -1254,6 +1254,7 @@ $codexEnv = [ordered]@{
 # reference them regardless of whether -NoLocalCodexBinPath was passed.
 $localCodexBin = Join-Path $runtime.LocalApp 'OpenAI\Codex\bin'
 $localCodexExe = Join-Path $localCodexBin 'codex.exe'
+$applyPatchWrapper = Join-Path $scriptRoot 'tools\apply_patch-wrapper.mjs'
 
 if (-not $NoLocalCodexBinPath) {
     if (-not (Test-Path -LiteralPath $localCodexBin)) {
@@ -1268,27 +1269,32 @@ if (-not $NoLocalCodexBinPath) {
         # Already in PATH or unset; do nothing.
     }
 
-    # Drop an `apply_patch.bat` shim into the user-local Codex bin. Codex
-    # itself generates an apply_patch.bat at runtime in
-    # `<CODEX_HOME>\tmp\arg0\codex-arg0XXXXX\` with a HARDCODED absolute
-    # path to the WindowsApps codex.exe -- that path is invocable only
-    # under AppX activation, so the bat fails with "Access is denied"
-    # under our Start-Process launch. Our shim does exactly what Codex's
-    # bat does except it resolves `codex.exe` via PATH lookup instead
-    # of an absolute path. Because the user-local Codex bin is the FIRST
-    # entry in Codex's PATH, `codex.exe` resolves to the byte-identical
-    # user-local copy that lives next to this shim -- which is freely
-    # invocable from any non-AppX child shell.
-    #
-    # If Codex's session-tmp bat directory ends up before our bin on the
-    # agent shell's PATH, the shim is shadowed and harmless. If our bin
-    # ends up first, the shim takes precedence and apply_patch.bat works
-    # exactly the way the model expects. Either way no semantic change.
+    # Drop an `apply_patch.bat` shim into the user-local Codex bin.
+    # Routed through tools\apply_patch-wrapper.mjs (Node) so the bat
+    # works under BOTH agent-shell stdin-pipe invocation
+    # (`$patch | apply_patch`) AND positional-arg invocation
+    # (`apply_patch $patch`) without being defeated by cmd.exe's quoting
+    # of multi-line arguments. The wrapper finally invokes the user-local
+    # codex.exe via CreateProcess, so the final argument reaches the
+    # Codex CLI cleanly. Empirically Codex prepends its session-tmp bat
+    # dir ahead of our bin on the agent shell's PATH so this particular
+    # shim is shadowed; the rewriter daemon below handles the session-
+    # tmp bat directly. The shim is still installed as a belt-and-
+    # suspenders fallback for any path-lookup that hits our bin first.
     $shimBat = Join-Path $localCodexBin 'apply_patch.bat'
-    $shimContent = @'
+    if (Test-Path -LiteralPath $applyPatchWrapper) {
+        $shimEscapedNode = $nodeExe.Replace('"', '\"')
+        $shimEscapedWrap = $applyPatchWrapper.Replace('"', '\"')
+        $shimEscapedExe  = $localCodexExe.Replace('"', '\"')
+        $shimContent = "@echo off`r`n`"$shimEscapedNode`" `"$shimEscapedWrap`" `"$shimEscapedExe`" %*`r`n"
+    } else {
+        # Wrapper missing: fall back to the naive form. Loses multi-line
+        # arg robustness but at least invokes the user-local codex.exe.
+        $shimContent = @'
 @echo off
 codex.exe --codex-run-as-apply-patch %*
 '@
+    }
     # Always (re)write so older shim versions get refreshed.
     Set-Content -LiteralPath $shimBat -Value $shimContent -Encoding ASCII
     Write-Host "[omniroute] installed apply_patch.bat shim: $shimBat"
@@ -1325,7 +1331,16 @@ if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
             }
         }
 
+        # If the Node wrapper exists, pass its path as a 4th arg to the
+        # rewriter so it routes session-tmp bats through the wrapper for
+        # stdin/argv robustness. Without the wrapper, the rewriter still
+        # patches the bat's hardcoded WindowsApps path to the user-local
+        # codex.exe -- which fixes Access Denied but leaves multi-line
+        # arg passing at the mercy of cmd.exe.
         $rwArgs = @($rewriterScript, $runtime.CodexHome, $localCodexExe)
+        if (Test-Path -LiteralPath $applyPatchWrapper) {
+            $rwArgs += $applyPatchWrapper
+        }
         $rwProc = $null
         try {
             $rwProc = Start-Process -FilePath $nodeExe `
@@ -1339,7 +1354,8 @@ if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
         if ($rwProc) {
             Set-Content -LiteralPath $rewriterPid -Value $rwProc.Id -Encoding ASCII
             try { $rwProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
-            Write-Host ("[omniroute] apply_patch rewriter daemon: pid={0} watching={1}\\tmp\\arg0  target={2}" -f $rwProc.Id, $runtime.CodexHome, $localCodexExe)
+            $wrapTag = if (Test-Path -LiteralPath $applyPatchWrapper) { ' wrapped-via=' + $applyPatchWrapper } else { '' }
+            Write-Host ("[omniroute] apply_patch rewriter daemon: pid={0} watching={1}\\tmp\\arg0  target={2}{3}" -f $rwProc.Id, $runtime.CodexHome, $localCodexExe, $wrapTag)
         }
     }
 } elseif ($NoApplyPatchRewriter) {

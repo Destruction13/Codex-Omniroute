@@ -46,7 +46,16 @@
  *     is comfortably fast enough.
  *
  * Usage:
- *   node apply_patch-rewriter.mjs <CODEX_HOME> <USER_LOCAL_CODEX_EXE>
+ *   node apply_patch-rewriter.mjs <CODEX_HOME> <USER_LOCAL_CODEX_EXE> [<APPLY_PATCH_WRAPPER_JS>]
+ *
+ * When the optional wrapper-mjs path is supplied, the bat is rewritten
+ * to invoke a Node-side helper (apply_patch-wrapper.mjs) instead of
+ * codex.exe directly. The wrapper handles stdin/argv robustly and
+ * normalizes CRLF/whitespace, so the bat works under both pipe-style
+ * invocation (`$patch | apply_patch`) and positional-arg invocation
+ * (`apply_patch $patch`) from a PowerShell agent shell -- where cmd.exe
+ * would otherwise mangle the multi-line argument and codex.exe would
+ * reject the patch as malformed.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -54,6 +63,7 @@ import process from "node:process";
 
 const codexHome = process.argv[2] || process.env.CODEX_HOME;
 const targetExe = process.argv[3];
+const wrapperMjs = process.argv[4]; // optional
 
 if (!codexHome) {
   console.error("error: CODEX_HOME is required (argv[2] or env)");
@@ -68,8 +78,9 @@ const watchRoot = path.join(codexHome, "tmp", "arg0");
 const logPath   = path.join(codexHome, "apply-patch-rewriter.log");
 const pidPath   = path.join(codexHome, "apply-patch-rewriter.pid");
 
-const APPX_RE = /"[^"]*\\Program Files\\WindowsApps\\OpenAI\.Codex[^"]+\\codex\.exe"/i;
-const RAW_EXE = targetExe.replace(/"/g, '\\"');
+const APPX_RE   = /"[^"]*\\Program Files\\WindowsApps\\OpenAI\.Codex[^"]+\\codex\.exe"\s*--codex-run-as-apply-patch\s*%\*/i;
+const RAW_EXE   = targetExe.replace(/"/g, '\\"');
+const RAW_WRAP  = wrapperMjs ? wrapperMjs.replace(/"/g, '\\"') : null;
 
 function log(msg) {
   try {
@@ -77,12 +88,39 @@ function log(msg) {
   } catch { /* ignore */ }
 }
 
+function shouldRewrite(content) {
+  // Rewrite if the bat still uses the WindowsApps-protected codex.exe,
+  // OR (when we know the wrapper path) if it does not already go through
+  // our wrapper -- so a stale rewrite that only swapped the codex.exe
+  // path but did not route through the wrapper gets upgraded the next
+  // time we see it.
+  if (APPX_RE.test(content)) return true;
+  if (RAW_WRAP) {
+    return !content.includes(RAW_WRAP);
+  }
+  return false;
+}
+
 function rewriteIfBroken(filePath) {
   let content;
   try { content = fs.readFileSync(filePath, "utf8"); }
   catch { return; }
-  if (!APPX_RE.test(content)) return;            // already-rewritten or unrelated
-  const fixed = content.replace(APPX_RE, `"${RAW_EXE}"`);
+  if (!shouldRewrite(content)) return;
+
+  let fixed;
+  if (RAW_WRAP) {
+    // Replace the entire bat body with one that calls our Node wrapper.
+    // The wrapper handles stdin/argv robustly and finally invokes
+    // <codex.exe> --codex-run-as-apply-patch <patch> via CreateProcess.
+    fixed = `@echo off\r\nnode "${RAW_WRAP}" "${RAW_EXE}" %*\r\n`;
+  } else {
+    // Fallback: just patch the hardcoded path. cmd.exe %* quirks still
+    // apply, but at least Access Denied is avoided.
+    fixed = content.replace(
+      APPX_RE,
+      `"${RAW_EXE}" --codex-run-as-apply-patch %*`,
+    );
+  }
   try {
     fs.writeFileSync(filePath, fixed);
     log(`rewrote ${filePath}`);

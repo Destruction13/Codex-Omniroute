@@ -607,13 +607,24 @@ if ($omniRaw) {
 $shimBat = Join-Path $localCodexBin 'apply_patch.bat'
 if (Test-Path -LiteralPath $shimBat) {
     $shimContent = Read-Utf8Text -Path $shimBat
-    if ($shimContent -and $shimContent -match '(?im)^\s*codex\.exe\s+--codex-run-as-apply-patch\s+%\*') {
-        Add-Result 'apply-patch-shim-present' 'PASS' "$shimBat resolves codex.exe via PATH"
+    if ($shimContent -and $shimContent -match 'apply_patch-wrapper\.mjs') {
+        Add-Result 'apply-patch-shim-present' 'PASS' "$shimBat routes through Node wrapper (stdin+argv robust)"
+    } elseif ($shimContent -and $shimContent -match '(?im)^\s*codex\.exe\s+--codex-run-as-apply-patch\s+%\*') {
+        Add-Result 'apply-patch-shim-present' 'WARN' "$shimBat uses naive form (PATH-resolved codex.exe); cmd.exe multi-line arg mangling may bite -- upgrade by re-running the launcher"
     } else {
         Add-Result 'apply-patch-shim-present' 'WARN' "$shimBat exists but does not look like the launcher-managed shim (content: $($shimContent -replace '\s+', ' '))"
     }
 } else {
     Add-Result 'apply-patch-shim-present' 'WARN' "no apply_patch.bat shim at $shimBat (launcher writes it next to user-local codex.exe; pass -NoLocalCodexBinPath to suppress)"
+}
+
+# apply_patch-wrapper.mjs (the Node helper that the shim and the
+# rewriter target route bats through) must exist and be valid Node.
+$applyPatchWrapper = Join-Path $workspace 'tools\apply_patch-wrapper.mjs'
+if (Test-Path -LiteralPath $applyPatchWrapper) {
+    Add-Result 'apply-patch-wrapper-present' 'PASS' $applyPatchWrapper
+} else {
+    Add-Result 'apply-patch-wrapper-present' 'WARN' "no $applyPatchWrapper (rewriter falls back to path-only fix; multi-line patches over cmd.exe will still fail)"
 }
 
 # apply_patch.bat rewriter daemon. This is our THIRD line of defense. The
