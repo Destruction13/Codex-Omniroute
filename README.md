@@ -6,6 +6,62 @@ This is **not** a Codex clone. It is a *runtime-isolation + bridge* harness arou
 
 ---
 
+## Quick start (for everyone, including non-technical users)
+
+If you just want this thing running and don't care about the architecture, do these five steps in order. Each step is a double-click or a single download.
+
+**1. Install the official Codex app from the Microsoft Store.**
+Open Microsoft Store, search for `OpenAI Codex`, install it, sign in, and open it once so it can finish first-time setup. After that, close it. Direct link:
+[apps.microsoft.com — search "openai codex"](https://apps.microsoft.com/search?query=openai+codex)
+
+**2. Install Node.js (LTS).**
+Download the LTS installer and run it with default options. Direct link:
+[nodejs.org](https://nodejs.org/)
+
+**3. Get the repo onto your machine.**
+Two equivalent ways:
+- **No git required:** open this repo's GitHub page, click the green **Code** button → **Download ZIP**, then unzip it somewhere you can find again (e.g. `C:\Tools\Codex-Omniroute`).
+- **With git:** `git clone https://github.com/Destruction13/Codex-Omniroute.git`
+
+**4. Get OmniRoute access.**
+You need a `base_url` and an `api_key` from the maintainer of this project. See the [Where to get OmniRoute access](#where-to-get-omniroute-access) section below for the contact. You won't be able to finish step 5 without these two values.
+
+**5. Run the setup wizard.**
+Open the folder where you put the repo. Double-click **`Setup.bat`**. The wizard will:
+- check that Codex and Node.js are installed,
+- ask you for the OmniRoute `base_url` and `api_key`,
+- save them into a local `omniroute-provider.json` (gitignored, never committed),
+- run a smoke test of the bridge.
+
+If the wizard finishes with `OK Verifier passed`, you're done.
+
+**6. Use Codex with OmniRoute.**
+From now on:
+- Double-click **`Start-Codex-OmniRoute.bat`** to launch Codex with your reasoning rerouted through OmniRoute.
+- Double-click **`Start-Codex-Official.bat`** if you ever want vanilla Codex (your normal account, normal quota, no rerouting).
+
+Both work side-by-side; OmniRoute mode is fully isolated and never touches your normal Codex profile.
+
+If something goes wrong, see the [GUIDE.md](GUIDE.md) "When something goes wrong" table — it covers the common failure modes (`Get-AppxPackage returned nothing`, `models_cache_missing`, `omniroute_not_configured`, etc.) with one-line fixes.
+
+---
+
+## Where to get OmniRoute access
+
+This repo is the *client* side of OmniRoute. The OmniRoute server itself (the actual reasoning provider that the bridge talks to) is operated by the repo maintainer and access is given out on request.
+
+To get a working `base_url` + `api_key`:
+- Open an issue on this repo with the title **"OmniRoute access request"**, OR
+- Contact the maintainer **[@Destruction13](https://github.com/Destruction13)** directly.
+
+What you'll receive is two values:
+1. **`base_url`** — looks like `http://127.0.0.1:20128/v1` (if you'll run an SSH tunnel — instructions provided with the credentials) or a direct `https://...` URL.
+2. **`api_key`** — an opaque token. Treat it like a password: never paste it into a chat, never commit it, never email it in plaintext.
+
+You drop both values into `Setup.bat` when prompted. They land in a local `omniroute-provider.json` file that is excluded from git via `.gitignore`, so they never leak into commits.
+
+---
+
 ## Architecture truth (read first)
 
 | Concern | Behavior |
@@ -56,26 +112,32 @@ codex-omniroute/
 ├── README.md                            # this file
 ├── GUIDE.md                             # day-to-day usage
 ├── codex-omniroute-windows-spec.md      # contract for re-implementers / auditors
+├── Setup.bat                            # ★ first-time wizard (double-click this)
+├── Setup.ps1                            # the wizard logic
 ├── Start-Codex-Official.ps1             # clean baseline launcher
 ├── Start-Codex-OmniRoute.ps1            # isolated runtime + bridge + official binary
 ├── Start-Codex-Official.bat             # convenience wrapper
 ├── Start-Codex-OmniRoute.bat            # convenience wrapper
 ├── codex-openai-omniroute-bridge.mjs    # local OpenAI-compatible bridge
 ├── verify-codex-omniroute.ps1           # invariant checker + optional live smoke
-├── omniroute-provider.example.json      # template; copy to omniroute-provider.json
-├── .env.example                         # env vars the bridge understands
+├── omniroute-provider.example.json      # template; Setup.bat creates omniroute-provider.json from this
+├── .env.example                         # env vars the bridge understands (alternative to JSON)
 ├── .gitignore                           # excludes runtime homes, secrets, logs, pid
 ├── package.json                         # node engines + scripts (no runtime deps)
 ├── mock-transcribe-upstream.mjs         # offline test target for /transcribe
 └── tools/
     ├── mcp_smoke_test.py                # MCP parity smoke (PATH/url presence)
     ├── mcp_probe.mjs                    # per-server JSON-RPC initialize probe
-    └── mcp-stdio-shield.mjs             # default-ON stdio filter for MCP children
+    ├── mcp-stdio-shield.mjs             # default-ON stdio filter for MCP children
+    ├── apply_patch-rewriter.mjs         # daemon that fixes Codex's session-tmp apply_patch.bat
+    └── apply_patch-wrapper.mjs          # Node wrapper around codex.exe --codex-run-as-apply-patch
 ```
 
 ---
 
-## Setup (Windows, PowerShell 7+)
+## Manual setup (advanced users — skip if you ran Setup.bat)
+
+This section is for users who want to bypass `Setup.bat` and configure the provider by hand. The Quick start above covers everything most users need.
 
 1. Install the official **Codex** app from the Microsoft Store. Sign in normally.
 2. `git clone` this repo into your project workspace.
@@ -96,6 +158,8 @@ codex-omniroute/
    ssh -L 20128:127.0.0.1:<remote_port> -L 1455:127.0.0.1:1455 <your-user>@<your-host>
    ```
    The repo never includes the tunnel command or its credentials.
+
+The launchers tolerate either Windows PowerShell 5.1 (the default `powershell.exe`) or PowerShell 7+ (`pwsh.exe`). The `.bat` shims invoke 5.1 by default, which is fine for everything in this repo.
 
 ---
 
