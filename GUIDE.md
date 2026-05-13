@@ -165,6 +165,33 @@ Where `C:\path\to\saved\.codex` is any directory containing at least an `auth.js
 
 `-Reset` is required when you change the auth source, because the launcher does not overwrite `auth.json` in an existing isolated runtime.
 
+## Freeform apply_patch (default ON)
+
+Without intervention, Codex's `apply_patch` chain is:
+```
+agent shell  ──►  apply_patch.bat  ──►  codex.exe --codex-run-as-apply-patch  ──►  Access is denied
+```
+
+The fail is rooted in Windows AppX containment: the bundled `codex.exe` lives in `C:\Program Files\WindowsApps\OpenAI.Codex_<ver>\app\resources\codex.exe`, which is only invocable from a parent process that holds the AppX package identity. `Start-Process Codex.exe` (what every non-Start-menu launch path does) gives Codex Desktop the package identity itself but does not propagate it to grandchildren shells, so re-invoking `codex.exe` from one of those shells fails. There is no launcher-level fix for that — see the AppX-activation note in `Start-Codex-OmniRoute.ps1`.
+
+The launcher works around it by setting
+
+```toml
+experimental_use_freeform_apply_patch = true
+```
+
+in the managed block of the isolated `config.toml`. This Codex flag (verified present in Codex 26.506.x via binary scan in the verifier) switches patch application to a freeform tool call that runs **in-process inside the already-running Codex Desktop**. No child shell, no AppX re-trigger, no Access Denied.
+
+The flag has one hard dependency: **the active model must support custom tools with grammar**, which currently means GPT-5 family models. The default `model = "gpt-5.4"` qualifies. If you point the launcher at a non-GPT-5 model (e.g. `gpt-4.1`, `claude-*`, `gemini-*`), freeform tools cannot be issued and patch application silently falls back to the shell-path, which fails. The verifier's `freeform-model-compatible` check warns you when this happens.
+
+To force the old shell-path (debugging only):
+
+```powershell
+.\Start-Codex-OmniRoute.ps1 -NoFreeformApplyPatch
+```
+
+This is rarely useful; do not enable it in production runs.
+
 ## When something goes wrong
 
 | Symptom | Likely cause | Fix |
@@ -178,7 +205,7 @@ Where `C:\path\to\saved\.codex` is any directory containing at least an `auth.js
 | Codex window looks indistinguishable from official | That's the goal. The OmniRoute window is the same official binary running with an isolated `userData`. |
 | `Failed to parse MCP message` in Codex's MCP log; UI shows MCPs configured but agent only sees one of them | Some MCP server is leaking non-JSON onto its stdout. | The shield is on by default now — make sure you didn't pass `-NoSanitizeMcpStdout`. Re-run with `.\verify-codex-omniroute.ps1` to confirm `mcp-probe` reports `ok=N fail=0`. |
 | Documents / Spreadsheets / Presentations / `browser-use` capabilities don't appear | A previous launcher version inherited the user's global `[marketplaces.*]` and `[plugins.*]` entries, which point at `~\.cache\codex-runtimes\…` and confuse the isolated runtime. | `.\Start-Codex-OmniRoute.ps1 -Reset`. The current launcher's allowlist only inherits `[mcp_servers.*]`, so Codex bootstraps marketplaces/plugins fresh inside the isolated home. |
-| `apply_patch -h` returns `Access is denied` inside the agent shell | This is an upstream Codex / Microsoft Store AppX-packaging limitation, not specific to OmniRoute. The bundled Codex agent CLI lives under `C:\Program Files\WindowsApps\OpenAI.Codex_<ver>\app\resources\codex.exe`. WindowsApps ACLs allow execution of files in that directory only when the parent process holds the AppX package identity. Codex Desktop *does* hold that identity — it has to, otherwise it could not read its own resources — but **only when launched through the AppX activation broker** (the same code path Start menu / taskbar / `shell:AppsFolder\<aumid>` use). Plain `Start-Process Codex.exe`, which is what every non-Start-menu launcher (OmniRoute, ssh, scheduled task, WSL bridge, devops automation) uses, gets the package identity for Codex itself but does not propagate it to the shells Codex spawns; those shells then cannot re-invoke `codex.exe` and `apply_patch.bat` fails. <br><br>This is a tradeoff baked into Windows: the AppX activation broker reliably propagates package identity but **drops custom env-var overrides**, and OmniRoute *needs* the env-var overrides (`USERPROFILE`, `CODEX_HOME`, `APPDATA`, `LOCALAPPDATA`) so the isolated runtime profile is what Codex reads. Without those, Codex would read the user's global `~\.codex\config.toml`, the OmniRoute provider config would never take effect, and inference would escape the bridge entirely. The launcher prefers env isolation. | **There is no in-launcher fix.** When you specifically need `apply_patch.bat` to work and don't need OmniRoute reasoning routing for that session, launch Codex from the Windows Start menu (which goes through AppX activation) — that gives a normal AppX-activated Codex with apply_patch working, but inference uses your real account's quota. As of this release the launcher does NOT attempt AppX activation: an earlier experiment confirmed that the broker silently strips our `CODEX_HOME` override and the resulting Codex pointed at the user's global profile instead. The only way to get both env isolation and apply_patch working together is for upstream Codex to ship its own AppX-context-aware apply_patch helper. |
+| `apply_patch -h` returns `Access is denied` inside the agent shell | The agent is using the shell-path (`apply_patch.bat -> codex.exe --codex-run-as-apply-patch`), which spawns the bundled Codex agent CLI as a child of a non-AppX shell and trips Windows AppX containment. | The launcher now writes `experimental_use_freeform_apply_patch = true` into the managed block by default (Codex 26.506.x supports this). It tells Codex to apply patches via an in-process freeform tool call inside the already-running Codex Desktop — no child shell, no AppX retrigger. Run `.\verify-codex-omniroute.ps1` and confirm `freeform-flag-supported` / `freeform-flag-set` / `freeform-model-compatible` are PASS. If `freeform-model-compatible` is WARN you have switched to a non-GPT-5 model and freeform tools won't be used; switch back to a GPT-5 family model or accept the apply_patch breakage. To force the old shell-path (e.g. for debugging), pass `-NoFreeformApplyPatch`. |
 | Wrong account seeded into the isolated runtime | `auth.json` was copied from `%USERPROFILE%\.codex\auth.json`, which is currently bound to a different account than you wanted. | Use `-AuthSource <dir>` with `-Reset` to point at any directory containing a saved `auth.json` for the desired account; see "Choosing which account is seeded" above. |
 
 ## What gets gitignored (do not commit these)

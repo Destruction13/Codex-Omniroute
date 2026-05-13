@@ -39,6 +39,7 @@ There are exactly two modes, both launched from this workspace:
     model = "gpt-5.4"
     model_reasoning_effort = "xhigh"
     profile = "omniroute_managed"
+    experimental_use_freeform_apply_patch = true
 
     [model_providers.omniroute_bridge]
     name = "OmniRoute Bridge"
@@ -55,6 +56,7 @@ There are exactly two modes, both launched from this workspace:
     [projects."<absolute workspace path>"]
     trust_level = "trusted"
     ```
+    `experimental_use_freeform_apply_patch = true` switches Codex's `apply_patch` to an in-process freeform tool call instead of the `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` shell-out. The shell-out path fails with "Access is denied" under any non-Start-menu launch (Windows AppX containment), and AppX activation cannot be used because the broker drops the launcher's isolated env overrides. The flag is on by default; pass `-NoFreeformApplyPatch` to suppress. Requires a GPT-5 family model (the launcher's default `gpt-5.4` qualifies); other models silently fall back to the broken shell-path and the verifier's `freeform-model-compatible` check warns when this happens.
 - The launcher does NOT modify `PATH`, does NOT install a git shim, and does NOT export `OMNIROUTE_REAL_GIT_EXE`. Codex sees the user's real `git`, `node`, `powershell.exe`, and other base commands unchanged. The only meaningful behavior difference between OmniRoute mode and Official mode is that main inference traffic is rerouted through the local bridge.
 - Inherited `[mcp_servers.<name>]` entries with a `command` (i.e. stdio MCP servers, not URL-based ones) are rewritten in the isolated `config.toml` so they run through `tools\mcp-stdio-shield.mjs`. The shield drops any non-JSON line on the child's stdout (taskkill `SUCCESS:` messages, npm warnings, cmd.exe banners) so they cannot corrupt the MCP JSON-RPC transport. Sub-tables like `[mcp_servers.<name>.env]` are left untouched. The shield is on by default; pass `-NoSanitizeMcpStdout` to disable.
 - The launcher mirrors `%LOCALAPPDATA%\Microsoft\WindowsApps` from the user's real `LOCALAPPDATA` into the isolated runtime via a directory junction (`mklink /J`). This keeps Microsoft Store AppX execution aliases resolvable inside the isolated runtime, which is what `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` and similar Codex-internal shell-out chains rely on. Pass `-NoMirrorAppxAliases` to skip the junction.
@@ -135,6 +137,10 @@ Native-feature parity invariants:
 14. `bridge.log` does not contain Windows process-management noise (`SUCCESS: The process with PID …`, `Failed to parse MCP message`, `Terminate batch job (Y/N)?`). This is best-effort: absence is necessary but not sufficient for a clean MCP transport.
 15. `tools/mcp_smoke_test.py`, when Python is available, runs cleanly against the isolated config (each MCP server's command is on `PATH` or its `url` is set).
 16. `tools/mcp_probe.mjs`, when Node is available, spawns each stdio MCP server with the same `command`/`args`/env Codex would use, sends a single `initialize` JSON-RPC request, and reports per-server whether a JSON-RPC frame came back within ~6s. A healthy isolated runtime answers `ok=N fail=0` (one entry per stdio server, plus `skip` for any URL-based servers).
+17. Freeform `apply_patch` invariants:
+    - The bundled Codex agent CLI at `<install>\app\resources\codex.exe` contains the string `experimental_use_freeform_apply_patch` (binary scan). This guards against a future Codex update renaming or removing the flag.
+    - The isolated `config.toml` has `experimental_use_freeform_apply_patch = true` somewhere in the file (the managed block by default).
+    - The active managed `model =` matches a GPT-5 family pattern (regex `(?i)(^|/)gpt-5(\.|-|$)`). Non-GPT-5 models silently fall back to the broken shell-path, so this check WARNs when set to anything else.
 
 Optional (`-Live`):
 - POST `/v1/responses` to confirm OmniRoute round-trip.

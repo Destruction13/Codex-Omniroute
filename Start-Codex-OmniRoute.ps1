@@ -114,7 +114,27 @@ param(
     # apply_patch.bat -> codex.exe --codex-run-as-apply-patch) keep
     # resolving even when the isolated runtime points LOCALAPPDATA at a
     # workspace-local directory. Default ON.
-    [switch]$NoMirrorAppxAliases
+    [switch]$NoMirrorAppxAliases,
+
+    # Apply patches via the in-process freeform-tool path instead of
+    # spawning `codex.exe --codex-run-as-apply-patch` from the agent
+    # shell. The shell-path requires the bundled codex.exe to be
+    # invocable from a non-AppX child process, which fails with
+    # "Access is denied" under any non-Start-menu launcher (this one
+    # included). Switching to the freeform-tool path keeps patch
+    # application entirely inside the already-running Codex Desktop
+    # process, which already holds package identity, so the AppX
+    # ACL constraint is never tripped.
+    #
+    # NB: the freeform-tool path requires the active model to support
+    # custom tools with grammar (GPT-5 family). The launcher's managed
+    # block defaults `model = "gpt-5.4"`, which qualifies. If you
+    # override `model` to a non-GPT-5 model in this launcher's params or
+    # in your inherited config, the freeform path silently falls back
+    # to the shell-path and you will hit "Access is denied" again. Pass
+    # -NoFreeformApplyPatch in that scenario to suppress the
+    # experimental flag from the managed block.
+    [switch]$NoFreeformApplyPatch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -776,7 +796,8 @@ function Write-IsolatedConfig {
         [string]$ProjectPath,
         [bool]$SanitizeMcp = $false,
         [string]$NodeExe = '',
-        [string]$ShieldScript = ''
+        [string]$ShieldScript = '',
+        [bool]$FreeformApplyPatch = $true
     )
 
     $inherited = Sanitize-OfficialConfig -OfficialConfigPath $OfficialConfigPath
@@ -788,6 +809,14 @@ function Write-IsolatedConfig {
     }
 
     $projectEscaped = $ProjectPath.Replace('\', '\\')
+
+    # The freeform-tool path applies patches in-process inside the running
+    # Codex Desktop instead of spawning `codex.exe --codex-run-as-apply-patch`
+    # from the agent shell. Spawn-path fails with "Access is denied" under
+    # any non-Start-menu launch (the AppX package identity does not
+    # propagate to grand-children), so freeform is the workaround. Codex
+    # 26.506.x supports the flag; binary scan in the verifier confirms it.
+    $freeformLine = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch = false (disabled by -NoFreeformApplyPatch)' }
 
     # Order matters here. The managed block ships its bare top-level scalars
     # FIRST so they land at the top of the file, before any [table] header.
@@ -804,6 +833,7 @@ model_provider = "omniroute_bridge"
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
 profile = "omniroute_managed"
+$freeformLine
 
 [model_providers.omniroute_bridge]
 name = "OmniRoute Bridge"
@@ -978,6 +1008,11 @@ if ($effectiveSanitize -and -not (Test-Path -LiteralPath $shieldScript)) {
     $effectiveSanitize = $false
 }
 
+# Freeform apply_patch is on by default. -NoFreeformApplyPatch suppresses
+# the experimental flag from the managed block. See the param block at the
+# top of this script for why this matters.
+$effectiveFreeform = -not $NoFreeformApplyPatch
+
 # Now write the isolated config with the actual chosen port.
 Write-IsolatedConfig `
     -IsolatedConfigPath (Join-Path $runtime.CodexHome 'config.toml') `
@@ -986,12 +1021,18 @@ Write-IsolatedConfig `
     -ProjectPath $workspace `
     -SanitizeMcp:$effectiveSanitize `
     -NodeExe $nodeExe `
-    -ShieldScript $shieldScript
+    -ShieldScript $shieldScript `
+    -FreeformApplyPatch:$effectiveFreeform
 
 if ($effectiveSanitize) {
     Write-Host "[omniroute] MCP stdio shield: ON (use -NoSanitizeMcpStdout to disable)"
 } else {
     Write-Host "[omniroute] MCP stdio shield: OFF"
+}
+if ($effectiveFreeform) {
+    Write-Host "[omniroute] freeform apply_patch: ON (in-process patching, requires GPT-5 family model; -NoFreeformApplyPatch to disable)"
+} else {
+    Write-Host "[omniroute] freeform apply_patch: OFF (apply_patch.bat shell-path will likely fail with Access Denied under non-AppX launches)"
 }
 
 # Per-process env overrides for the bridge child. We set these on the parent

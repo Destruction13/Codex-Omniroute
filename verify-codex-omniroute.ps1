@@ -40,6 +40,17 @@
            not sufficient.
        15. The MCP smoke test (tools/mcp_smoke_test.py) runs cleanly against the
            isolated config when Python is available.
+       16. Freeform apply_patch invariants:
+           - The bundled Codex agent CLI contains the string
+             `experimental_use_freeform_apply_patch` (so the in-process patch
+             path is actually plumbed through in the installed Codex version).
+           - The isolated config.toml has the flag set to true in the managed
+             block.
+           - The active managed `model =` looks like a GPT-5 family model
+             (freeform tools require grammar-supporting models; non-GPT-5
+             silently falls back to the broken shell-path).
+       17. The MCP per-server JSON-RPC probe (tools/mcp_probe.mjs) reports
+           ok=N fail=0 for every stdio MCP entry.
 
     Optional live smokes (only run with -Live):
        - POST /v1/responses
@@ -461,7 +472,84 @@ if ($python -and (Test-Path -LiteralPath $mcpSmoke)) {
     Add-Result 'mcp-smoke' 'WARN' "skipped ($reason)"
 }
 
-# ---------------- 16. MCP per-server JSON-RPC probe ----------------
+# ---------------- 17/18/19. freeform apply_patch invariants ----------------
+# 17. The bundled Codex agent CLI must contain the freeform flag string,
+#     otherwise the flag we write into the managed config does nothing
+#     and apply_patch silently falls back to the shell-path (Access Denied
+#     under non-AppX launches). We string-search the binary in chunks
+#     because it is ~245 MB.
+# 18. The isolated config.toml must contain the flag in the managed block.
+#     This catches a future revision of the launcher that forgets to emit
+#     the flag, or a -NoFreeformApplyPatch override that the operator did
+#     not intend.
+# 19. The active model in the managed block must look like a GPT-5 family
+#     model. Freeform tools require the model to support custom tools
+#     with grammar, which is GPT-5 territory. Setting the flag for
+#     gpt-4.1 / Claude / Gemini etc. is a no-op AND silently regresses
+#     apply_patch to the broken shell-path.
+$pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
+$freeformFlag = 'experimental_use_freeform_apply_patch'
+if ($pkg) {
+    if ($pkg -is [array]) { $pkg = $pkg[0] }
+    $bundledAgent = Join-Path $pkg.InstallLocation 'app\resources\codex.exe'
+    if (Test-Path -LiteralPath $bundledAgent) {
+        $found = $false
+        $chunk = 16 * 1024 * 1024
+        try {
+            $fs = [System.IO.File]::OpenRead($bundledAgent)
+            try {
+                $buf = [byte[]]::new($chunk)
+                while ($true) {
+                    $read = $fs.Read($buf, 0, $chunk)
+                    if ($read -le 0) { break }
+                    $text = [System.Text.Encoding]::ASCII.GetString($buf, 0, $read)
+                    if ($text.IndexOf($freeformFlag) -ge 0) { $found = $true; break }
+                }
+            } finally { $fs.Dispose() }
+        } catch {
+            Add-Result 'freeform-flag-supported' 'WARN' ("could not scan $bundledAgent" + ': ' + $_.Exception.Message)
+        }
+        if ($found) {
+            Add-Result 'freeform-flag-supported' 'PASS' "bundled codex.exe contains '$freeformFlag'"
+        } else {
+            Add-Result 'freeform-flag-supported' 'FAIL' "bundled codex.exe does NOT contain '$freeformFlag' (Codex update may have renamed/removed the flag)"
+        }
+    } else {
+        Add-Result 'freeform-flag-supported' 'WARN' "bundled codex.exe not found at $bundledAgent"
+    }
+} else {
+    Add-Result 'freeform-flag-supported' 'WARN' 'OpenAI.Codex AppX package not installed; cannot scan bundled binary'
+}
+
+if ($isoText) {
+    if ($isoText -match '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*true\b') {
+        Add-Result 'freeform-flag-set' 'PASS' "$freeformFlag = true is present in the managed block"
+    } elseif ($isoText -match '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*false\b') {
+        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = false (apply_patch will use shell-path; expected to fail with Access Denied)"
+    } else {
+        Add-Result 'freeform-flag-set' 'FAIL' "$freeformFlag is missing from the isolated config (apply_patch will use shell-path)"
+    }
+
+    # Pull the managed-block model. It is the first `model = "..."` line
+    # before any [profiles.*] / [model_providers.*] section.
+    $managedModel = $null
+    $modelLine = [regex]::Match($isoText, '(?im)^\s*model\s*=\s*"([^"]+)"')
+    if ($modelLine.Success) { $managedModel = $modelLine.Groups[1].Value }
+    if ($managedModel) {
+        # GPT-5 family heuristic: anything starting with "gpt-5" (case-insensitive),
+        # optionally with provider prefix like "openai/gpt-5..." or "cx/gpt-5...".
+        $isGpt5 = $managedModel -match '(?i)(^|/)gpt-5(\.|-|$)'
+        if ($isGpt5) {
+            Add-Result 'freeform-model-compatible' 'PASS' "managed model '$managedModel' looks GPT-5 family"
+        } else {
+            Add-Result 'freeform-model-compatible' 'WARN' "managed model '$managedModel' is not GPT-5 family; freeform apply_patch will silently fall back to shell-path (Access Denied)"
+        }
+    } else {
+        Add-Result 'freeform-model-compatible' 'WARN' "could not read managed model from isolated config"
+    }
+}
+
+# ---------------- 20. MCP per-server JSON-RPC probe ----------------
 # The smoke test only checks that each MCP server's command resolves on
 # PATH. The probe actually spawns each stdio MCP server and waits for a
 # JSON-RPC frame in response to an `initialize` request. This is what
