@@ -598,13 +598,12 @@ if ($omniRaw) {
     }
 }
 
-# apply_patch.bat shim in user-local Codex bin. This is our defense against
-# Codex's session-tmp bat hardcoding an absolute path to the WindowsApps
-# codex.exe (which is blocked by AppX containment under our launch). Our
-# shim invokes `codex.exe` via PATH lookup so it lands on the user-local
-# copy that lives next to it. The shim is only useful if the user-local
-# bin dir is FIRST on the agent shell's PATH; if Codex prepends its tmp
-# dir even earlier the shim is shadowed (and harmless).
+# apply_patch.bat shim in user-local Codex bin. This is our second defense
+# against Codex's session-tmp bat hardcoding an absolute path to the
+# WindowsApps codex.exe (which is blocked by AppX containment under our
+# launch). The shim only fires when the user-local bin dir is FIRST on
+# the agent shell's PATH; empirically Codex prepends its session-tmp
+# dir AHEAD of our bin, so the shim is shadowed -- but it is harmless.
 $shimBat = Join-Path $localCodexBin 'apply_patch.bat'
 if (Test-Path -LiteralPath $shimBat) {
     $shimContent = Read-Utf8Text -Path $shimBat
@@ -615,6 +614,64 @@ if (Test-Path -LiteralPath $shimBat) {
     }
 } else {
     Add-Result 'apply-patch-shim-present' 'WARN' "no apply_patch.bat shim at $shimBat (launcher writes it next to user-local codex.exe; pass -NoLocalCodexBinPath to suppress)"
+}
+
+# apply_patch.bat rewriter daemon. This is our THIRD line of defense. The
+# daemon polls <CODEX_HOME>\tmp\arg0\ for the apply_patch.bat that Codex
+# generates per session, and rewrites the hardcoded WindowsApps codex.exe
+# path to point at the user-local copy. Required when freeform-flag does
+# not activate AND Codex's tmp dir is first on agent PATH (shadowing the
+# bin shim) -- which is the current state of the world.
+$rewriterPidFile = Join-Path $workspace 'apply-patch-rewriter.pid'
+$rewriterScript  = Join-Path $workspace 'tools\apply_patch-rewriter.mjs'
+if (Test-Path -LiteralPath $rewriterScript) {
+    Add-Result 'apply-patch-rewriter-script' 'PASS' $rewriterScript
+} else {
+    Add-Result 'apply-patch-rewriter-script' 'WARN' "no $rewriterScript"
+}
+if (Test-Path -LiteralPath $rewriterPidFile) {
+    $rwPid = (Get-Content -LiteralPath $rewriterPidFile -Raw -ErrorAction SilentlyContinue).Trim()
+    if ($rwPid -match '^\d+$' -and (Get-Process -Id ([int]$rwPid) -ErrorAction SilentlyContinue)) {
+        Add-Result 'apply-patch-rewriter-running' 'PASS' "pid=$rwPid, file=$rewriterPidFile"
+    } else {
+        Add-Result 'apply-patch-rewriter-running' 'WARN' "rewriter pid file '$rewriterPidFile' contains '$rwPid' but that process is not running"
+    }
+} else {
+    Add-Result 'apply-patch-rewriter-running' 'WARN' "no rewriter daemon pid file at $rewriterPidFile (rerun launcher after Codex's first GUI launch creates the user-local codex.exe)"
+}
+
+# Inspect Codex's session-tmp apply_patch.bat (if a session has run
+# in this isolated runtime) -- after rewriter activity it should point
+# at the user-local codex.exe, NOT the WindowsApps one.
+$tmpArg0 = Join-Path $workspace (Join-Path $RuntimeHome 'codex\tmp\arg0')
+if (Test-Path -LiteralPath $tmpArg0) {
+    $bats = @(Get-ChildItem -LiteralPath $tmpArg0 -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Join-Path $_.FullName 'apply_patch.bat'
+    } | Where-Object { Test-Path -LiteralPath $_ })
+    if ($bats.Count -eq 0) {
+        Add-Result 'apply-patch-rewriter-effective' 'WARN' "no apply_patch.bat under $tmpArg0 yet (Codex creates it on first agent session; rerun verifier after the agent has done at least one tool call)"
+    } else {
+        $brokenCount = 0
+        $rewrittenCount = 0
+        $sampleBroken = $null
+        foreach ($bat in $bats) {
+            $body = Read-Utf8Text -Path $bat
+            if (-not $body) { continue }
+            if ($body -match 'Program Files\\WindowsApps\\OpenAI\.Codex') {
+                $brokenCount++
+                if (-not $sampleBroken) { $sampleBroken = $bat }
+            } else {
+                $rewrittenCount++
+            }
+        }
+        if ($brokenCount -eq 0) {
+            Add-Result 'apply-patch-rewriter-effective' 'PASS' "$rewrittenCount apply_patch.bat under $tmpArg0 all point at non-AppX codex.exe"
+        } else {
+            Add-Result 'apply-patch-rewriter-effective' 'FAIL' "$brokenCount apply_patch.bat still hardcoded to WindowsApps codex.exe (sample: $sampleBroken); rewriter daemon may not be running or has not caught up yet"
+        }
+    }
+} else {
+    Add-Result 'apply-patch-rewriter-effective' 'WARN' "no $tmpArg0 yet (Codex creates this dir on first agent shell spawn)"
 }
 
 # ---------------- 21. MCP per-server JSON-RPC probe ----------------

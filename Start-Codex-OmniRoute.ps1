@@ -152,7 +152,28 @@ param(
     # the prepend, so no other tool gets shadowed. The added directory
     # is INSIDE our isolated runtime home so it cannot pollute outside.
     # Pass -NoLocalCodexBinPath to skip.
-    [switch]$NoLocalCodexBinPath
+    [switch]$NoLocalCodexBinPath,
+
+    # Run tools\apply_patch-rewriter.mjs as a long-lived daemon next to
+    # the bridge. The daemon watches <CODEX_HOME>\tmp\arg0\ for
+    # apply_patch.bat files Codex Desktop generates at session start
+    # and rewrites their hardcoded `"C:\Program Files\WindowsApps\OpenAI.Codex\...\codex.exe"`
+    # path to point at the user-local copy that lives outside WindowsApps
+    # and is freely invocable from non-AppX child shells.
+    #
+    # This is the third (and most aggressive) line of defense against
+    # the AppX containment failure mode of apply_patch.bat. The previous
+    # two (freeform tool flag, PATH-prepended user-local Codex bin with
+    # an apply_patch.bat shim) are both shadowed in the current Codex
+    # builds: Codex picks the shell-path of apply_patch regardless of
+    # the freeform flag, AND Codex prepends its session-tmp directory
+    # ahead of our bin on the agent shell's PATH, so our shim is never
+    # found first.
+    #
+    # The rewriter is opt-out via -NoApplyPatchRewriter. Disabling all
+    # three defenses simultaneously means apply_patch will fail with
+    # "Access is denied" inside the agent shell.
+    [switch]$NoApplyPatchRewriter
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1228,8 +1249,13 @@ $codexEnv = [ordered]@{
 # cheap insurance: any other tool that ends up resolving codex.exe via
 # PATH (debug helpers, future Codex versions, third-party MCP servers
 # that shell out to it) will still get a working binary.
+# Resolve the user-local Codex bin paths once, in scope of the whole
+# Main block, so later defenses (rewriter daemon, verifier checks) can
+# reference them regardless of whether -NoLocalCodexBinPath was passed.
+$localCodexBin = Join-Path $runtime.LocalApp 'OpenAI\Codex\bin'
+$localCodexExe = Join-Path $localCodexBin 'codex.exe'
+
 if (-not $NoLocalCodexBinPath) {
-    $localCodexBin = Join-Path $runtime.LocalApp 'OpenAI\Codex\bin'
     if (-not (Test-Path -LiteralPath $localCodexBin)) {
         New-Item -ItemType Directory -Path $localCodexBin -Force | Out-Null
     }
@@ -1269,6 +1295,59 @@ codex.exe --codex-run-as-apply-patch %*
 } else {
     Write-Host "[omniroute] -NoLocalCodexBinPath: user-local Codex bin NOT added to PATH (apply_patch shell-path will fail with Access Denied)"
 }
+
+# ---- apply_patch.bat rewriter daemon ------------------------------------
+# Codex Desktop generates `apply_patch.bat` at runtime in
+# `<CODEX_HOME>\tmp\arg0\codex-arg0XXXXX\` with a HARDCODED absolute
+# path to the WindowsApps codex.exe. Codex prepends that tmp directory
+# AHEAD of our user-local Codex bin on the agent shell's PATH, so our
+# bat shim above is shadowed. The rewriter daemon below watches Codex's
+# tmp directory and rewrites the bat in place to point at the user-local
+# (non-AppX-protected) codex.exe copy. This is the third defense layer.
+$rewriterPid = Join-Path $workspace 'apply-patch-rewriter.pid'
+if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
+    $rewriterScript = Join-Path $scriptRoot 'tools\apply_patch-rewriter.mjs'
+    if (-not (Test-Path -LiteralPath $rewriterScript)) {
+        Write-Warning "[omniroute] apply_patch rewriter script missing: $rewriterScript"
+    } else {
+        # Reap any previous rewriter daemon left over from a prior launch.
+        $rewriterRuntimePid = Join-Path $runtime.CodexHome 'apply-patch-rewriter.pid'
+        foreach ($pidFile in @($rewriterPid, $rewriterRuntimePid)) {
+            if (Test-Path -LiteralPath $pidFile) {
+                $oldRwPid = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue).Trim()
+                if ($oldRwPid -match '^\d+$') {
+                    $oldRw = Get-Process -Id ([int]$oldRwPid) -ErrorAction SilentlyContinue
+                    if ($oldRw -and $oldRw.ProcessName -match '^node') {
+                        try { Stop-Process -Id ([int]$oldRwPid) -Force -ErrorAction Stop } catch {}
+                    }
+                }
+                Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        $rwArgs = @($rewriterScript, $runtime.CodexHome, $localCodexExe)
+        $rwProc = $null
+        try {
+            $rwProc = Start-Process -FilePath $nodeExe `
+                -ArgumentList $rwArgs `
+                -WorkingDirectory $workspace `
+                -WindowStyle Hidden `
+                -PassThru
+        } catch {
+            Write-Warning "[omniroute] failed to start apply_patch rewriter: $($_.Exception.Message)"
+        }
+        if ($rwProc) {
+            Set-Content -LiteralPath $rewriterPid -Value $rwProc.Id -Encoding ASCII
+            try { $rwProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+            Write-Host ("[omniroute] apply_patch rewriter daemon: pid={0} watching={1}\\tmp\\arg0  target={2}" -f $rwProc.Id, $runtime.CodexHome, $localCodexExe)
+        }
+    }
+} elseif ($NoApplyPatchRewriter) {
+    Write-Host "[omniroute] -NoApplyPatchRewriter: apply_patch.bat rewriter daemon NOT started (apply_patch.bat hardcoded path will trip Access Denied)"
+} else {
+    Write-Host "[omniroute] apply_patch rewriter daemon SKIPPED: user-local codex.exe not present yet at $localCodexExe (Codex Desktop materializes it on first GUI launch; rerun launcher afterwards to enable rewriter)"
+}
+
 # --open-project tells Codex Desktop to open the workspace as a real
 # project-bound session. Without it Codex starts on the "Work in project"
 # landing page and creates a synthetic projectless chat under
