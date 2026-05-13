@@ -530,18 +530,21 @@ if ($pkg) {
 
 if ($isoText) {
     # Count how many DISTINCT placements of the flag we wrote. Codex accepts
-    # the flag at top-level, inside a [features] table, and per-profile
-    # inside [profiles.<name>]. Empirically the per-profile placement is
-    # what actually toggles the in-process tool when an explicit
-    # `profile = ...` is active, so verify at least one positive setting
-    # exists AND that the per-profile placement is present.
+    # the flag at top-level, inside a [features] table, per-profile inside
+    # [profiles.<name>], AND inside [profiles.<name>.features]. We want all
+    # four ideally; specifically [profiles.<name>.features] is what
+    # profile_toml.rs:63 actually parses. Pass if all four positive
+    # placements are present.
     $allTrue = [regex]::Matches($isoText, '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*true\b').Count
     $allFalse = [regex]::Matches($isoText, '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*false\b').Count
-    $profileBlockMatch = [regex]::Match($isoText, '(?ims)\[profiles\.omniroute_managed\][^\[]*?experimental_use_freeform_apply_patch\s*=\s*true')
-    if ($allTrue -gt 0 -and $profileBlockMatch.Success) {
-        Add-Result 'freeform-flag-set' 'PASS' "$freeformFlag = true present in [profiles.omniroute_managed] and $allTrue total placements"
+    $profileBlockMatch  = [regex]::Match($isoText, '(?ims)\[profiles\.omniroute_managed\][^\[]*?experimental_use_freeform_apply_patch\s*=\s*true')
+    $profileFeatsMatch  = [regex]::Match($isoText, '(?ims)\[profiles\.omniroute_managed\.features\][^\[]*?experimental_use_freeform_apply_patch\s*=\s*true')
+    if ($allTrue -gt 0 -and $profileBlockMatch.Success -and $profileFeatsMatch.Success) {
+        Add-Result 'freeform-flag-set' 'PASS' "$freeformFlag = true present in [profiles.omniroute_managed] AND [profiles.omniroute_managed.features] ($allTrue total)"
+    } elseif ($allTrue -gt 0 -and $profileBlockMatch.Success) {
+        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag set in [profiles.omniroute_managed] but NOT in [profiles.omniroute_managed.features]; the .features sub-table is what profile_toml.rs:63 parses"
     } elseif ($allTrue -gt 0) {
-        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = true present at $allTrue place(s) but NOT inside [profiles.omniroute_managed] -- the profile section is the one Codex actually honors when a profile is selected; freeform tool may not activate"
+        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = true present at $allTrue place(s) but NOT inside the omniroute_managed profile (the profile section is what Codex actually honors when a profile is selected)"
     } elseif ($allFalse -gt 0) {
         Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = false (apply_patch will use shell-path)"
     } else {
@@ -593,6 +596,25 @@ if ($omniRaw) {
     } else {
         Add-Result 'local-codex-bin-path-logic' 'WARN' 'launcher does not appear to prepend user-local Codex bin to PATH (apply_patch shell-path may fail with Access Denied)'
     }
+}
+
+# apply_patch.bat shim in user-local Codex bin. This is our defense against
+# Codex's session-tmp bat hardcoding an absolute path to the WindowsApps
+# codex.exe (which is blocked by AppX containment under our launch). Our
+# shim invokes `codex.exe` via PATH lookup so it lands on the user-local
+# copy that lives next to it. The shim is only useful if the user-local
+# bin dir is FIRST on the agent shell's PATH; if Codex prepends its tmp
+# dir even earlier the shim is shadowed (and harmless).
+$shimBat = Join-Path $localCodexBin 'apply_patch.bat'
+if (Test-Path -LiteralPath $shimBat) {
+    $shimContent = Read-Utf8Text -Path $shimBat
+    if ($shimContent -and $shimContent -match '(?im)^\s*codex\.exe\s+--codex-run-as-apply-patch\s+%\*') {
+        Add-Result 'apply-patch-shim-present' 'PASS' "$shimBat resolves codex.exe via PATH"
+    } else {
+        Add-Result 'apply-patch-shim-present' 'WARN' "$shimBat exists but does not look like the launcher-managed shim (content: $($shimContent -replace '\s+', ' '))"
+    }
+} else {
+    Add-Result 'apply-patch-shim-present' 'WARN' "no apply_patch.bat shim at $shimBat (launcher writes it next to user-local codex.exe; pass -NoLocalCodexBinPath to suppress)"
 }
 
 # ---------------- 21. MCP per-server JSON-RPC probe ----------------

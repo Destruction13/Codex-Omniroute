@@ -835,17 +835,21 @@ function Write-IsolatedConfig {
     # propagate to grand-children), so freeform is the workaround. Codex
     # 26.506.x supports the flag; binary scan in the verifier confirms it.
     #
-    # The flag is written in THREE places. Codex's config schema (per a
-    # binary scan of the bundled agent CLI) exposes the flag both at
-    # top-level, inside a `[features]` table, and per-profile inside
-    # `[profiles.<name>]`. Empirically a bare top-level placement alone
-    # does NOT activate the freeform tool when an explicit `profile = ...`
-    # is set (the profile section wins). Writing it in all three
-    # locations is harmless redundancy and guarantees that whichever
-    # placement Codex's parser actually honors is satisfied.
-    $freeformTopLevel  = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch = false (disabled by -NoFreeformApplyPatch)' }
-    $freeformFeatures  = if ($FreeformApplyPatch) { "[features]`nexperimental_use_freeform_apply_patch = true`n" } else { '' }
-    $freeformInProfile = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch suppressed' }
+    # The flag is written in FOUR places. Codex's config schema (per binary
+    # scan of the bundled agent CLI) exposes the flag at:
+    #   - bare top-level                            (Config struct)
+    #   - inside `[features]`                       (top-level Features struct)
+    #   - inside `[profiles.<name>]`                (Profile struct, direct field)
+    #   - inside `[profiles.<name>.features]`       (per-profile Features sub-table)
+    # Empirically a single placement does not always activate the freeform
+    # tool -- the per-profile-features sub-table is what `profile_toml.rs`
+    # actually parses. Writing in all four locations is harmless
+    # redundancy and guarantees whichever placement Codex's parser
+    # consults is satisfied.
+    $freeformTopLevel   = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch = false (disabled by -NoFreeformApplyPatch)' }
+    $freeformFeatures   = if ($FreeformApplyPatch) { "[features]`nexperimental_use_freeform_apply_patch = true`n" } else { '' }
+    $freeformInProfile  = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch suppressed' }
+    $freeformProfFeats  = if ($FreeformApplyPatch) { "`n[profiles.omniroute_managed.features]`nexperimental_use_freeform_apply_patch = true`n" } else { '' }
 
     # Order matters here. The managed block ships its bare top-level scalars
     # FIRST so they land at the top of the file, before any [table] header.
@@ -877,7 +881,7 @@ model_provider = "omniroute_bridge"
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
 $freeformInProfile
-
+$freeformProfFeats
 [projects."$projectEscaped"]
 trust_level = "trusted"
 $($script:OmniManagedEnd)
@@ -1237,6 +1241,31 @@ if (-not $NoLocalCodexBinPath) {
     } else {
         # Already in PATH or unset; do nothing.
     }
+
+    # Drop an `apply_patch.bat` shim into the user-local Codex bin. Codex
+    # itself generates an apply_patch.bat at runtime in
+    # `<CODEX_HOME>\tmp\arg0\codex-arg0XXXXX\` with a HARDCODED absolute
+    # path to the WindowsApps codex.exe -- that path is invocable only
+    # under AppX activation, so the bat fails with "Access is denied"
+    # under our Start-Process launch. Our shim does exactly what Codex's
+    # bat does except it resolves `codex.exe` via PATH lookup instead
+    # of an absolute path. Because the user-local Codex bin is the FIRST
+    # entry in Codex's PATH, `codex.exe` resolves to the byte-identical
+    # user-local copy that lives next to this shim -- which is freely
+    # invocable from any non-AppX child shell.
+    #
+    # If Codex's session-tmp bat directory ends up before our bin on the
+    # agent shell's PATH, the shim is shadowed and harmless. If our bin
+    # ends up first, the shim takes precedence and apply_patch.bat works
+    # exactly the way the model expects. Either way no semantic change.
+    $shimBat = Join-Path $localCodexBin 'apply_patch.bat'
+    $shimContent = @'
+@echo off
+codex.exe --codex-run-as-apply-patch %*
+'@
+    # Always (re)write so older shim versions get refreshed.
+    Set-Content -LiteralPath $shimBat -Value $shimContent -Encoding ASCII
+    Write-Host "[omniroute] installed apply_patch.bat shim: $shimBat"
 } else {
     Write-Host "[omniroute] -NoLocalCodexBinPath: user-local Codex bin NOT added to PATH (apply_patch shell-path will fail with Access Denied)"
 }
