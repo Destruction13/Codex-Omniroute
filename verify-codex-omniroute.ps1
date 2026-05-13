@@ -128,7 +128,16 @@ if (Test-Path -LiteralPath $officialLauncher) {
 # wrote. The OmniRoute launchers here never write to %USERPROFILE%\.codex.
 # If this FAILs the operator likely set the override manually in a previous
 # experiment -- they should remove it for a clean baseline.
-$globalConfig = Join-Path $env:USERPROFILE '.codex\config.toml'
+#
+# Resolve USERPROFILE via SHGetKnownFolderPath, not via the $env:USERPROFILE
+# variable. The verifier may itself be running inside a parent shell that has
+# already overridden USERPROFILE (e.g. when invoked from within an isolated
+# Codex runtime that points USERPROFILE at .codex-omniroute-home\profile).
+# Special-folder lookup is token-based and ignores that override, so we always
+# check the real user's profile.
+$realUserProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+if (-not $realUserProfile) { $realUserProfile = $env:USERPROFILE }
+$globalConfig = Join-Path $realUserProfile '.codex\config.toml'
 if (Test-Path -LiteralPath $globalConfig) {
     $globalText = Get-Content -LiteralPath $globalConfig -Raw
     if ($globalText -match 'model_provider\s*=\s*"omniroute_bridge"') {
@@ -179,6 +188,51 @@ try {
     exit 1
 }
 
+# Discover the *actual* port the launcher picked. The requested -BridgePort
+# may have been busy (e.g. another Codex install holding 20333), in which case
+# Find-FreePort moved us forward to 20334 / 20335 / .... We discover the real
+# port in three steps:
+#   1) parse the most recent `port=NNNN` line from bridge.log
+#   2) probe /healthz across $BridgePort..$BridgePort+50 as a fallback
+#   3) hard-fail if neither finds a live bridge
+function Resolve-BridgePort {
+    param([string]$LogFile, [int]$Preferred, [int]$Range = 50)
+
+    if (Test-Path -LiteralPath $LogFile) {
+        $lines = Get-Content -LiteralPath $LogFile -ErrorAction SilentlyContinue
+        if ($lines) {
+            for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+                if ($lines[$i] -match 'port=(\d+)') {
+                    $candidate = [int]$Matches[1]
+                    try {
+                        $h = Invoke-RestMethod -Uri "http://127.0.0.1:$candidate/healthz" -TimeoutSec 2 -ErrorAction Stop
+                        if ($h.ok) { return @{ Port = $candidate; Source = "bridge.log"; Health = $h } }
+                    } catch { }
+                    break
+                }
+            }
+        }
+    }
+
+    for ($p = $Preferred; $p -lt $Preferred + $Range; $p++) {
+        try {
+            $h = Invoke-RestMethod -Uri "http://127.0.0.1:$p/healthz" -TimeoutSec 1 -ErrorAction Stop
+            if ($h.ok) { return @{ Port = $p; Source = "scan"; Health = $h } }
+        } catch { }
+    }
+    return $null
+}
+
+$resolved = Resolve-BridgePort -LogFile $bridgeLogFile -Preferred $BridgePort
+if (-not $resolved) {
+    Add-Result 'bridge-port-resolved' 'FAIL' "could not locate live bridge on 127.0.0.1:$BridgePort..$($BridgePort+50). See $bridgeLogFile."
+    $results | Format-Table -AutoSize | Out-String | Write-Host
+    exit 1
+}
+$actualPort = [int]$resolved.Port
+$health     = $resolved.Health
+Add-Result 'bridge-port-resolved' 'PASS' ("port={0} (source={1}); requested={2}" -f $actualPort, $resolved.Source, $BridgePort)
+
 # bridge PID file
 $bridgePid = $null
 if (Test-Path -LiteralPath $bridgePidFile) {
@@ -192,17 +246,11 @@ if (Test-Path -LiteralPath $bridgePidFile) {
     Add-Result 'bridge-pid-managed' 'FAIL' "missing $bridgePidFile"
 }
 
-# health
-$health = $null
-try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$BridgePort/healthz" -TimeoutSec 3
-    if ($health.ok) {
-        Add-Result 'bridge-health' 'PASS' ("port={0} omniroute_configured={1}" -f $health.port, $health.omniroute.configured)
-    } else {
-        Add-Result 'bridge-health' 'FAIL' 'response missing ok=true'
-    }
-} catch {
-    Add-Result 'bridge-health' 'FAIL' $_.Exception.Message
+# health (already retrieved during Resolve-BridgePort)
+if ($health -and $health.ok) {
+    Add-Result 'bridge-health' 'PASS' ("port={0} omniroute_configured={1}" -f $health.port, $health.omniroute.configured)
+} else {
+    Add-Result 'bridge-health' 'FAIL' "no /healthz response from port $actualPort"
 }
 
 # isolated config
@@ -223,22 +271,71 @@ if (Test-Path -LiteralPath $isolatedConfig) {
 }
 
 # ---------------- 9. dictation base64 smoke ----------------
+# Windows PowerShell 5.1 does NOT support -SkipHttpErrorCheck. We need to
+# treat non-2xx responses as a normal result (not a thrown exception), so we
+# wrap Invoke-WebRequest in try/catch and read $_.Exception.Response on the
+# error path. This works identically in 5.1 and 7+.
+function Invoke-StatusAwareWebRequest {
+    param(
+        [string]$Uri,
+        [string]$Method = 'GET',
+        [hashtable]$Headers,
+        $Body,
+        [int]$TimeoutSec = 5
+    )
+    try {
+        # Note: $args is an automatic PowerShell variable, so we use a different name.
+        $iwrArgs = @{
+            Uri        = $Uri
+            Method     = $Method
+            TimeoutSec = $TimeoutSec
+            ErrorAction = 'Stop'
+            UseBasicParsing = $true
+        }
+        if ($Headers) { $iwrArgs.Headers = $Headers }
+        if ($null -ne $Body) { $iwrArgs.Body = $Body }
+        return Invoke-WebRequest @iwrArgs
+    } catch {
+        $resp = $null
+        try { $resp = $_.Exception.Response } catch {}
+        if (-not $resp) { throw }
+        $status = [int]$resp.StatusCode
+        # PS 7+ exposes the upstream body via $_.ErrorDetails.Message (the
+        # response stream has typically already been consumed). PS 5.1 leaves
+        # it in $resp.GetResponseStream(). Try both.
+        $bodyText = ''
+        try {
+            if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+                $bodyText = [string]$_.ErrorDetails.Message
+            }
+        } catch {}
+        if (-not $bodyText) {
+            try {
+                $stream = $resp.GetResponseStream()
+                if ($stream -and $stream.CanRead) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $bodyText = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            } catch {}
+        }
+        return [pscustomobject]@{ StatusCode = $status; Content = $bodyText }
+    }
+}
+
 try {
     $tinyBytes = [System.Text.Encoding]::ASCII.GetBytes('not-really-audio-but-bytes-flow')
     $b64 = [Convert]::ToBase64String($tinyBytes)
-    $resp = Invoke-WebRequest `
-        -Uri "http://127.0.0.1:$BridgePort/transcribe" `
+    $resp = Invoke-StatusAwareWebRequest `
+        -Uri "http://127.0.0.1:$actualPort/transcribe" `
         -Method POST `
         -Headers @{ 'x-codex-base64' = '1'; 'content-type' = 'multipart/form-data; boundary=---x' } `
         -Body $b64 `
-        -SkipHttpErrorCheck `
         -TimeoutSec 5
     # The bridge will try to forward to the official upstream; we don't care whether
     # the upstream accepts the bogus payload -- only that the bridge did not refuse
     # the base64 envelope locally (400 bad_request_encoding).
-    $isLocalReject = $resp.StatusCode -eq 400 -and (
-        $resp.Content -match 'bad_request_encoding'
-    )
+    $isLocalReject = ($resp.StatusCode -eq 400) -and ([string]$resp.Content -match 'bad_request_encoding')
     if ($isLocalReject) {
         Add-Result 'dictation-base64-decode' 'FAIL' 'bridge rejected base64 envelope locally'
     } else {
@@ -253,7 +350,7 @@ if ($Live) {
     Write-Host "`n[verify] live smokes enabled" -ForegroundColor Cyan
     try {
         $resp = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:$BridgePort/v1/responses" `
+            -Uri "http://127.0.0.1:$actualPort/v1/responses" `
             -Method POST `
             -ContentType 'application/json' `
             -Body (@{ model = 'gpt-5.4'; input = 'ping'; stream = $false } | ConvertTo-Json) `
@@ -264,7 +361,7 @@ if ($Live) {
     }
     try {
         $resp = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:$BridgePort/v1/responses/compact" `
+            -Uri "http://127.0.0.1:$actualPort/v1/responses/compact" `
             -Method POST `
             -ContentType 'application/json' `
             -Body '{}' `
