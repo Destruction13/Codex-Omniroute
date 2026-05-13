@@ -31,10 +31,57 @@ SECTION_RE = re.compile(r"^\s*\[([A-Za-z0-9_.\-\"]+)\]\s*$")
 KV_RE = re.compile(r'^\s*([A-Za-z0-9_\-]+)\s*=\s*(.+?)\s*$')
 
 
+def _split_server_section(section: str) -> tuple[str | None, str | None]:
+    """Split a `[mcp_servers.X[.sub]]` section header into (server_name, sub_table).
+
+    - `mcp_servers.foo`           -> ("foo", None)            top-level server
+    - `mcp_servers.foo.env`       -> ("foo", "env")           sub-table of foo
+    - `mcp_servers."weird.name"`  -> ("weird.name", None)     quoted name with dot
+    - `mcp_servers."weird".env`   -> ("weird", "env")         quoted name + sub-table
+    - anything else               -> (None, None)             not an mcp server section
+
+    The previous parser greedily matched `[mcp_servers.foo.env]` as a new server
+    named "foo.env", which made any config that used a sub-table like
+    `[mcp_servers.foo.env]` (perfectly valid TOML) blow up the smoke test.
+    """
+    if not section.startswith("mcp_servers."):
+        return None, None
+    rest = section[len("mcp_servers."):]
+    if not rest:
+        return None, None
+
+    # Quoted-name path: mcp_servers."some.name"[.sub]
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end == -1:
+            return None, None
+        name = rest[1:end]
+        tail = rest[end + 1:]
+        if tail == "":
+            return name, None
+        if tail.startswith("."):
+            return name, tail[1:] or None
+        return None, None
+
+    # Bare-name path: mcp_servers.foo[.sub]
+    parts = rest.split(".", 1)
+    name = parts[0]
+    sub = parts[1] if len(parts) > 1 else None
+    if not name:
+        return None, None
+    return name, sub
+
+
 def parse_mcp_servers(text: str) -> dict[str, dict[str, Any]]:
-    """Very small TOML-ish parser, scoped to extracting [mcp_servers.<name>] blocks."""
+    """Very small TOML-ish parser, scoped to extracting [mcp_servers.<name>] blocks.
+
+    Top-level sections like `[mcp_servers.foo]` define a server. Nested
+    sub-tables like `[mcp_servers.foo.env]` attach key/value pairs to the
+    parent server under that sub-table name, not as a new server.
+    """
     servers: dict[str, dict[str, Any]] = {}
-    current: str | None = None
+    current_server: str | None = None
+    current_sub: str | None = None
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -42,14 +89,19 @@ def parse_mcp_servers(text: str) -> dict[str, dict[str, Any]]:
         m = SECTION_RE.match(raw)
         if m:
             section = m.group(1)
-            if section.startswith("mcp_servers."):
-                name = section[len("mcp_servers.") :].strip('"')
-                servers[name] = {"_section": section}
-                current = name
-            else:
-                current = None
+            name, sub = _split_server_section(section)
+            if name is None:
+                current_server = None
+                current_sub = None
+                continue
+            if name not in servers:
+                servers[name] = {"_section": "mcp_servers." + name}
+            if sub:
+                servers[name].setdefault(sub, {})
+            current_server = name
+            current_sub = sub
             continue
-        if current is None:
+        if current_server is None:
             continue
         kv = KV_RE.match(raw)
         if not kv:
@@ -60,7 +112,7 @@ def parse_mcp_servers(text: str) -> dict[str, dict[str, Any]]:
             val = val.split("#", 1)[0].rstrip()
         # Decode simple TOML scalar types.
         if val.startswith('"') and val.endswith('"'):
-            servers[current][key] = val[1:-1]
+            decoded: Any = val[1:-1]
         elif val.startswith("[") and val.endswith("]"):
             inner = val[1:-1].strip()
             items: list[str] = []
@@ -69,14 +121,23 @@ def parse_mcp_servers(text: str) -> dict[str, dict[str, Any]]:
                 parts = re.findall(r'"((?:[^"\\]|\\.)*)"|([^,\s][^,]*)', inner)
                 for q, b in parts:
                     items.append(q if q else b.strip())
-            servers[current][key] = items
+            decoded = items
         elif val in ("true", "false"):
-            servers[current][key] = val == "true"
+            decoded = val == "true"
         else:
             try:
-                servers[current][key] = int(val)
+                decoded = int(val)
             except ValueError:
-                servers[current][key] = val
+                decoded = val
+
+        # Route the assignment into the active sub-table (e.g. `env`) if any,
+        # so `[mcp_servers.foo.env]\nFOO = "bar"` becomes
+        # servers["foo"]["env"]["FOO"] = "bar" rather than overwriting
+        # servers["foo"]["FOO"].
+        target = servers[current_server]
+        if current_sub:
+            target = target.setdefault(current_sub, {})
+        target[key] = decoded
     return servers
 
 
