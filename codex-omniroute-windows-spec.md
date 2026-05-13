@@ -26,8 +26,14 @@ There are exactly two modes, both launched from this workspace:
 - Creates / reuses workspace-local `.codex-omniroute-home/` containing isolated `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `CODEX_HOME`, and Electron `userData` directory (`CODEX_ELECTRON_USER_DATA_PATH`).
 - Seeds **only** `auth.json`, `models_cache.json`, `installation_id` from the user's official Codex home, and only when those files are missing in the isolated home.
 - Writes the isolated `config.toml`:
-  - Inherits the user's official `config.toml` content, **except** any `[model_providers.*]`, `[profile]`, `[profiles.*]`, `model_provider`, `model`, `model_reasoning_effort`, and `profile` lines, which are stripped.
-  - Adds:
+  - Inherits the user's official `config.toml` using an **explicit allowlist**. By default the only inherited section family is `[mcp_servers.*]` (and its sub-tables, e.g. `[mcp_servers.<name>.env]`). Everything else is dropped, including:
+    - `[marketplaces.*]` (marketplace sources point at the user's global `~\.cache\codex-runtimes\...` and `~\.codex\.tmp\bundled-marketplaces\...` paths; inheriting them makes the isolated runtime reach back into the user's global cache),
+    - `[plugins.*]` (plugin enable bits reference marketplace IDs that may not exist inside the isolated runtime),
+    - `[projects.*]` (foreign project trust entries are irrelevant to the isolated workspace),
+    - `[windows]` (machine-wide sandbox/shell preferences),
+    - `[model_providers.*]`, `[profiles.*]`, top-level `model`, `model_provider`, `model_reasoning_effort`, `profile` (the OmniRoute managed block owns these).
+  - The allowlist is enforced by `Sanitize-OfficialConfig` in `Start-Codex-OmniRoute.ps1` and re-asserted by `verify-codex-omniroute.ps1`.
+  - Adds the OmniRoute managed block:
     ```toml
     model_provider = "omniroute_bridge"
     model = "gpt-5.4"
@@ -49,6 +55,10 @@ There are exactly two modes, both launched from this workspace:
     [projects."<absolute workspace path>"]
     trust_level = "trusted"
     ```
+- The launcher does NOT modify `PATH`, does NOT install a git shim, and does NOT export `OMNIROUTE_REAL_GIT_EXE`. Codex sees the user's real `git`, `node`, `powershell.exe`, and other base commands unchanged. The only meaningful behavior difference between OmniRoute mode and Official mode is that main inference traffic is rerouted through the local bridge.
+- Inherited `[mcp_servers.<name>]` entries with a `command` (i.e. stdio MCP servers, not URL-based ones) are rewritten in the isolated `config.toml` so they run through `tools\mcp-stdio-shield.mjs`. The shield drops any non-JSON line on the child's stdout (taskkill `SUCCESS:` messages, npm warnings, cmd.exe banners) so they cannot corrupt the MCP JSON-RPC transport. Sub-tables like `[mcp_servers.<name>.env]` are left untouched. The shield is on by default; pass `-NoSanitizeMcpStdout` to disable.
+- The launcher mirrors `%LOCALAPPDATA%\Microsoft\WindowsApps` from the user's real `LOCALAPPDATA` into the isolated runtime via a directory junction (`mklink /J`). This keeps Microsoft Store AppX execution aliases resolvable inside the isolated runtime, which is what `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` and similar Codex-internal shell-out chains rely on. Pass `-NoMirrorAppxAliases` to skip the junction.
+- `auth.json`, `models_cache.json`, and `installation_id` seeding can be redirected from the default `%USERPROFILE%\.codex` to any directory via `-AuthSource <dir>`. Use this when the official Codex profile is currently bound to the wrong account; combine with `-Reset` to actually overwrite an existing isolated runtime.
 - Starts `codex-openai-omniroute-bridge.mjs` on `127.0.0.1`, preferred port `20333`, port-scanning forward if busy.
 - `bridge.pid` and `bridge.log` live **in the workspace**, not in the isolated runtime home.
 - Waits for `/healthz` to return `{ok: true}` (timeout: 25s).
@@ -106,6 +116,7 @@ If none resolve, OmniRoute-bound routes return `500 omniroute_not_configured`. O
 
 `verify-codex-omniroute.ps1` must perform, at minimum:
 
+Bridge / config invariants:
 1. Run `Start-Codex-OmniRoute.ps1 -NoCodex` and confirm exit 0.
 2. Confirm `bridge.pid` exists and refers to a live process.
 3. Confirm `/healthz` returns `ok=true`.
@@ -116,6 +127,14 @@ If none resolve, OmniRoute-bound routes return `500 omniroute_not_configured`. O
 8. Run `Start-Codex-Official.ps1 -DryRun` and confirm no new `node` helpers were spawned.
 9. POST to `/transcribe` with `x-codex-base64: 1` and verify the bridge does not 4xx-reject locally with `bad_request_encoding`.
 10. Stop the managed bridge and confirm the PID is gone.
+
+Native-feature parity invariants:
+11. The isolated `config.toml` has NO `[marketplaces.*]`, `[plugins.*]`, `[windows]`, `[model_providers.<x>]` other than `omniroute_bridge`, or `[profiles.<x>]` other than `omniroute_managed` sections. The only `[projects.*]` entry is the workspace itself.
+12. `Start-Codex-OmniRoute.ps1` source contains no git-shim references (`Ensure-GitShim`, `Resolve-CSharpCompiler`, `OMNIROUTE_REAL_GIT_EXE`, `tools\git-shim`). `tools/git-shim/` does not exist as a directory containing a built shim binary.
+13. The isolated runtime's `skills` directory, when present, resolves under `.codex-omniroute-home`, not under the user's global `~\.codex\skills`.
+14. `bridge.log` does not contain Windows process-management noise (`SUCCESS: The process with PID …`, `Failed to parse MCP message`, `Terminate batch job (Y/N)?`). This is best-effort: absence is necessary but not sufficient for a clean MCP transport.
+15. `tools/mcp_smoke_test.py`, when Python is available, runs cleanly against the isolated config (each MCP server's command is on `PATH` or its `url` is set).
+16. `tools/mcp_probe.mjs`, when Node is available, spawns each stdio MCP server with the same `command`/`args`/env Codex would use, sends a single `initialize` JSON-RPC request, and reports per-server whether a JSON-RPC frame came back within ~6s. A healthy isolated runtime answers `ok=N fail=0` (one entry per stdio server, plus `skip` for any URL-based servers).
 
 Optional (`-Live`):
 - POST `/v1/responses` to confirm OmniRoute round-trip.

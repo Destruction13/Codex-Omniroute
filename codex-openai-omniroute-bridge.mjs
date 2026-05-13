@@ -36,6 +36,7 @@ import http from "node:http";
 import https from "node:https";
 import { URL } from "node:url";
 import { Buffer } from "node:buffer";
+import fsSync from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -94,6 +95,23 @@ const HOP_BY_HOP = new Set([
 // Logging
 // ----------------------------------------------------------------------------
 
+// Optional persistent log file. The launcher passes BRIDGE_LOG_PATH so the
+// bridge can keep a durable record of its activity even when the launcher
+// PowerShell process exits and the inherited stdout pipe goes away. Without
+// this fallback the bridge dies on first stdout write after the parent shell
+// closes (EPIPE / CTRL_CLOSE_EVENT), which leaves Codex Desktop talking to a
+// dead loopback port and silently retrying.
+const BRIDGE_LOG_PATH = process.env.BRIDGE_LOG_PATH || "";
+let BRIDGE_LOG_STREAM = null;
+if (BRIDGE_LOG_PATH) {
+  try {
+    BRIDGE_LOG_STREAM = fsSync.createWriteStream(BRIDGE_LOG_PATH, { flags: "a" });
+    BRIDGE_LOG_STREAM.on("error", () => { BRIDGE_LOG_STREAM = null; });
+  } catch {
+    BRIDGE_LOG_STREAM = null;
+  }
+}
+
 const LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 function log(level, ...args) {
   if ((LEVELS[level] ?? 2) > (LEVELS[LOG_LEVEL] ?? 2)) return;
@@ -101,8 +119,19 @@ function log(level, ...args) {
   const line = `[${ts}] [${level.toUpperCase()}] ${args
     .map((a) => (typeof a === "string" ? a : safeStringify(a)))
     .join(" ")}`;
-  process.stdout.write(line + "\n");
+  // Best-effort stdout write -- ignore EPIPE if the launcher's pipe is gone.
+  try { process.stdout.write(line + "\n"); } catch {}
+  if (BRIDGE_LOG_STREAM) {
+    try { BRIDGE_LOG_STREAM.write(line + "\n"); } catch {}
+  }
 }
+
+// Swallow EPIPE on stdout/stderr so the bridge keeps serving Codex even
+// after the parent launcher's pipe is closed. Without this, the next
+// `process.stdout.write` from any logger will surface as an uncaught error
+// and tear the process down.
+process.stdout.on?.("error", () => {});
+process.stderr.on?.("error", () => {});
 function safeStringify(o) {
   try {
     return JSON.stringify(o, redactReplacer);

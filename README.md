@@ -17,8 +17,9 @@ This is **not** a Codex clone. It is a *runtime-isolation + bridge* harness arou
 | Compact (`/v1/responses/compact`) | **Bridge → official upstream**, using inbound auth or `auth.json` fallback. |
 | Dictation (`/v1/audio/transcriptions`, `/transcribe`) | **Bridge → official upstream**, including base64 multipart envelopes tagged with `x-codex-base64: 1`. |
 | Models list (`/v1/models`) | **Served from isolated `models_cache.json`** — never fetched from OmniRoute. |
-| MCP definitions | **Inherited** from your official `config.toml` into the isolated config (provider/profile-conflicting blocks stripped); MCP count parity is preserved generically, not pinned to a number. |
+| MCP definitions | **Inherited** from your official `config.toml` into the isolated config under an explicit allowlist: only `[mcp_servers.*]` (and its sub-tables) is copied. Marketplaces, plugins, foreign projects, and `[windows]` are dropped, so the isolated runtime never reaches into your global `~\.cache\codex-runtimes` or `~\.codex\.tmp\bundled-marketplaces`. |
 | Project trust | The isolated config marks the current workspace as `trust_level = "trusted"`. |
+| `git`, `node`, `npx`, etc. | **User's real binaries.** The launcher does NOT install a git shim or override `PATH`. Codex sees the same toolchain it would see under the official launcher. |
 | Global `%USERPROFILE%\.codex\config.toml` | **Never written.** |
 | Workspace-local `.codex\config.toml` | **Never written.** |
 
@@ -43,6 +44,8 @@ If you find yourself wanting to "recreate Codex itself", stop. The whole point i
 13. Model identifiers like `gpt-5.4` are normalized to `cx/gpt-5.4` (prefix is configurable) before forwarding.
 14. No connection IDs, account IDs, or API keys are hardcoded; everything sensitive comes from env, `omniroute-provider.json` (gitignored), or an OpenCode-style provider config.
 15. `verify-codex-omniroute.ps1` exercises all parity invariants without leaving the workspace polluted.
+16. The launcher never installs a `git` shim, never modifies `PATH`, and never exports `OMNIROUTE_REAL_GIT_EXE`. Inference routing through the local bridge is the **only** intended behavior difference between OmniRoute and Official mode.
+17. The isolated `config.toml` only inherits `[mcp_servers.*]` from the user's official config. `[marketplaces.*]`, `[plugins.*]`, foreign `[projects.*]`, `[windows]`, `[model_providers.*]`, `[profiles.*]`, and bare top-level keys are dropped, so the isolated runtime never reaches into the user's global cache.
 
 ---
 
@@ -65,7 +68,9 @@ codex-omniroute/
 ├── package.json                         # node engines + scripts (no runtime deps)
 ├── mock-transcribe-upstream.mjs         # offline test target for /transcribe
 └── tools/
-    └── mcp_smoke_test.py                # MCP parity smoke
+    ├── mcp_smoke_test.py                # MCP parity smoke (PATH/url presence)
+    ├── mcp_probe.mjs                    # per-server JSON-RPC initialize probe
+    └── mcp-stdio-shield.mjs             # default-ON stdio filter for MCP children
 ```
 
 ---

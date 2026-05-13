@@ -5,21 +5,41 @@
 .DESCRIPTION
     Runs a bounded OmniRoute launch (bridge only, no Codex GUI) and checks:
 
-      1. Start-Codex-OmniRoute.ps1 -NoCodex succeeds.
-      2. The bridge /healthz responds.
-      3. The bridge process is workspace-managed (PID file exists and matches).
-      4. The isolated runtime config.toml exists and references model_provider = "omniroute_bridge".
-      5. No workspace-local OmniRoute config pollution exists
-         (.codex\config.toml under the workspace is NOT created).
-      6. No active global Codex provider override exists
-         (%USERPROFILE%\.codex\config.toml has no model_provider = "omniroute_bridge"
-         and is not modified by the launchers).
-      7. The official launcher Start-Codex-Official.ps1 contains no OmniRoute env overrides.
-      8. The official launcher (in DryRun) spawns no OmniRoute helper processes.
-      9. The dictation bridge supports base64 desktop uploads
-         (bridge responds to POST /transcribe with x-codex-base64=1 -- we send a tiny
-         smoke payload and verify the bridge attempts to forward, not 4xx-rejects locally).
-     10. The managed bridge stops cleanly after verification.
+      Bridge / config invariants:
+        1. Start-Codex-OmniRoute.ps1 -NoCodex succeeds.
+        2. The bridge /healthz responds.
+        3. The bridge process is workspace-managed (PID file exists and matches).
+        4. The isolated runtime config.toml exists and references model_provider = "omniroute_bridge".
+        5. No workspace-local OmniRoute config pollution exists
+           (.codex\config.toml under the workspace is NOT created).
+        6. No active global Codex provider override exists
+           (%USERPROFILE%\.codex\config.toml has no model_provider = "omniroute_bridge"
+           and is not modified by the launchers).
+        7. The official launcher Start-Codex-Official.ps1 contains no OmniRoute env overrides.
+        8. The official launcher (in DryRun) spawns no OmniRoute helper processes.
+        9. The dictation bridge supports base64 desktop uploads
+           (bridge responds to POST /transcribe with x-codex-base64=1 -- we send a tiny
+           smoke payload and verify the bridge attempts to forward, not 4xx-rejects locally).
+       10. The managed bridge stops cleanly after verification.
+
+      Native-feature parity invariants (added to catch tool/MCP/runtime regressions):
+       11. The isolated config does NOT inherit forbidden sections
+           ([marketplaces.*], [plugins.*], [projects.*] other than the workspace,
+           [windows], [model_providers.*] other than omniroute_bridge,
+           [profiles.*] other than omniroute_managed). These tables historically
+           leaked machine-specific paths from the user's global Codex home into
+           the isolated profile and broke runtime/plugin discovery.
+       12. The launcher does NOT install a git shim or override PATH. tools/git-shim/
+           must not contain a built shim binary, and the launcher source must not
+           reference a shim. Codex sees the user's real git unchanged.
+       13. The isolated runtime's skills directory lives under .codex-omniroute-home
+           (not under the user's global %USERPROFILE%\.codex\skills).
+       14. bridge.log does NOT contain Windows process-management noise that would
+           indicate the JSON-RPC MCP transport got polluted (e.g. taskkill SUCCESS
+           lines). This is best-effort; absence of the pattern is necessary but
+           not sufficient.
+       15. The MCP smoke test (tools/mcp_smoke_test.py) runs cleanly against the
+           isolated config when Python is available.
 
     Optional live smokes (only run with -Live):
        - POST /v1/responses
@@ -35,12 +55,17 @@
 
 .PARAMETER BridgePort
     Preferred bridge port. Default 20333.
+
+.PARAMETER FreshRuntime
+    Pass -Reset to the OmniRoute launcher so the isolated runtime is rebuilt
+    from scratch. Recommended for CI / regression runs.
 #>
 
 [CmdletBinding()]
 param(
     [switch]$Live,
     [switch]$LeaveBridgeRunning,
+    [switch]$FreshRuntime,
     [int]$BridgePort = 20333,
     [string]$RuntimeHome = '.codex-omniroute-home'
 )
@@ -54,6 +79,21 @@ function Add-Result {
     $results.Add([pscustomobject]@{ Name = $Name; Status = $Status; Detail = $Detail }) | Out-Null
     $color = switch ($Status) { 'PASS' { 'Green' } 'FAIL' { 'Red' } 'WARN' { 'Yellow' } default { 'Gray' } }
     Write-Host ("[{0}] {1} -- {2}" -f $Status, $Name, $Detail) -ForegroundColor $color
+}
+
+function Read-Utf8Text {
+    # Like Get-Content -Raw, but always UTF-8. Windows PowerShell 5.1's
+    # default Get-Content encoding follows the active code page, which
+    # mojibakes any non-ASCII byte in the user's TOML config or in a
+    # profile path containing Cyrillic / CJK / etc. characters.
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try {
+        $utf8 = New-Object System.Text.UTF8Encoding($true)
+        return [System.IO.File]::ReadAllText($Path, $utf8)
+    } catch {
+        return $null
+    }
 }
 
 $workspace = (Get-Location).Path
@@ -99,7 +139,7 @@ function Strip-PSComments {
 # not in comments / docstrings. The official launcher's docstring legitimately
 # describes what it does NOT do, which would otherwise trip this check.
 if (Test-Path -LiteralPath $officialLauncher) {
-    $officialRaw = Get-Content -LiteralPath $officialLauncher -Raw
+    $officialRaw = Read-Utf8Text -Path $officialLauncher
     $officialCode = Strip-PSComments -Text $officialRaw
     $pollutionPatterns = @(
         'OMNIROUTE_',
@@ -139,7 +179,7 @@ $realUserProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::Use
 if (-not $realUserProfile) { $realUserProfile = $env:USERPROFILE }
 $globalConfig = Join-Path $realUserProfile '.codex\config.toml'
 if (Test-Path -LiteralPath $globalConfig) {
-    $globalText = Get-Content -LiteralPath $globalConfig -Raw
+    $globalText = Read-Utf8Text -Path $globalConfig
     if ($globalText -match 'model_provider\s*=\s*"omniroute_bridge"') {
         Add-Result 'global-config-clean' 'FAIL' "global $globalConfig already contains model_provider=`"omniroute_bridge`" -- this launcher did not write it, but you should remove it manually for a clean baseline."
     } else {
@@ -180,9 +220,11 @@ if (-not (Test-Path -LiteralPath $omniLauncher)) {
 
 Write-Host "`n[verify] starting OmniRoute launcher with -NoCodex ..." -ForegroundColor Cyan
 try {
-    & $psHost -NoProfile -File $omniLauncher -NoCodex -BridgePort $BridgePort -RuntimeHome $RuntimeHome
+    $launcherArgs = @('-NoProfile', '-File', $omniLauncher, '-NoCodex', '-BridgePort', "$BridgePort", '-RuntimeHome', $RuntimeHome)
+    if ($FreshRuntime) { $launcherArgs += '-Reset' }
+    & $psHost @launcherArgs
     if ($LASTEXITCODE -ne 0) { throw "launcher exited with code $LASTEXITCODE" }
-    Add-Result 'omniroute-launch' 'PASS' '-NoCodex succeeded'
+    Add-Result 'omniroute-launch' 'PASS' ('-NoCodex succeeded' + ($(if ($FreshRuntime) { ' (fresh runtime)' } else { '' })))
 } catch {
     Add-Result 'omniroute-launch' 'FAIL' $_.Exception.Message
     exit 1
@@ -255,12 +297,13 @@ if ($health -and $health.ok) {
 
 # isolated config
 $isolatedConfig = Join-Path $workspace (Join-Path $RuntimeHome 'codex\config.toml')
+$isoText = $null
 if (Test-Path -LiteralPath $isolatedConfig) {
-    $iso = Get-Content -LiteralPath $isolatedConfig -Raw
-    $ok = ($iso -match 'model_provider\s*=\s*"omniroute_bridge"') -and
-          ($iso -match '\[model_providers\.omniroute_bridge\]') -and
-          ($iso -match 'wire_api\s*=\s*"responses"') -and
-          ($iso -match 'requires_openai_auth\s*=\s*true')
+    $isoText = Read-Utf8Text -Path $isolatedConfig
+    $ok = ($isoText -match 'model_provider\s*=\s*"omniroute_bridge"') -and
+          ($isoText -match '\[model_providers\.omniroute_bridge\]') -and
+          ($isoText -match 'wire_api\s*=\s*"responses"') -and
+          ($isoText -match 'requires_openai_auth\s*=\s*true')
     if ($ok) {
         Add-Result 'isolated-config-anchored' 'PASS' $isolatedConfig
     } else {
@@ -268,6 +311,206 @@ if (Test-Path -LiteralPath $isolatedConfig) {
     }
 } else {
     Add-Result 'isolated-config-anchored' 'FAIL' "missing $isolatedConfig"
+}
+
+# ---------------- 11. isolated config inheritance allowlist ----------------
+# Even with the launcher's allowlist sanitizer, a stray manual edit could
+# reintroduce forbidden tables. We assert that the produced isolated config
+# contains NO forbidden section headers. The single allowed exception is the
+# managed [projects."<workspace>"] block we own, and the omniroute_bridge /
+# omniroute_managed model-provider/profile blocks.
+if ($isoText) {
+    $forbiddenSectionPatterns = @(
+        @{ Name = 'no-marketplaces';      Pattern = '(?im)^\[\s*marketplaces(\.|\])';                                    Detail = '[marketplaces.*] sections must not be inherited' },
+        @{ Name = 'no-plugins';            Pattern = '(?im)^\[\s*plugins(\.|\])';                                          Detail = '[plugins.*] sections must not be inherited' },
+        @{ Name = 'no-windows';            Pattern = '(?im)^\[\s*windows\s*\]';                                            Detail = '[windows] section must not be inherited' },
+        @{ Name = 'no-foreign-providers';  Pattern = '(?im)^\[\s*model_providers\.(?!omniroute_bridge\b)';                Detail = 'only [model_providers.omniroute_bridge] is allowed' },
+        @{ Name = 'no-foreign-profiles';   Pattern = '(?im)^\[\s*profiles\.(?!omniroute_managed\b)';                       Detail = 'only [profiles.omniroute_managed] is allowed' }
+    )
+    foreach ($check in $forbiddenSectionPatterns) {
+        if ($isoText -match $check.Pattern) {
+            Add-Result $check.Name 'FAIL' $check.Detail
+        } else {
+            Add-Result $check.Name 'PASS' "absent"
+        }
+    }
+
+    # Project trust: the only [projects.*] entry in the isolated config must
+    # be for the current workspace. Foreign project paths from the user's
+    # global config (other repos, Documents\Codex\<date>\..., etc.) must not
+    # appear here.
+    $projectMatches = [regex]::Matches($isoText, '(?im)^\[\s*projects\.(.+?)\s*\]')
+    $expectedKey = $workspace.Replace('\', '\\')
+    $foreignProjects = @()
+    foreach ($m in $projectMatches) {
+        $key = $m.Groups[1].Value.Trim().Trim('"').Trim("'")
+        $normKey = $key -replace '/', '\\'
+        $normWorkspace = $expectedKey -replace '/', '\\'
+        if ($normKey -ieq $normWorkspace) { continue }
+        $foreignProjects += $key
+    }
+    if ($foreignProjects.Count -eq 0) {
+        Add-Result 'no-foreign-projects' 'PASS' 'only the workspace project is trusted in the isolated config'
+    } else {
+        Add-Result 'no-foreign-projects' 'FAIL' ('foreign [projects.*] entries leaked: ' + ($foreignProjects -join '; '))
+    }
+}
+
+# ---------------- 12. no git shim, no PATH override ----------------
+# The launcher source must not reference a git shim, must not override PATH,
+# and tools/git-shim/ must not contain a built shim binary. The whole point
+# of removing the shim is that Codex sees the user's real git unchanged --
+# anything that reintroduces it silently breaks the project goal.
+$omniRaw = Read-Utf8Text -Path $omniLauncher
+$omniCode = if ($omniRaw) { Strip-PSComments -Text $omniRaw } else { '' }
+$shimSentinels = @(
+    'Ensure-GitShim',
+    'Resolve-CSharpCompiler',
+    'OMNIROUTE_REAL_GIT_EXE',
+    'tools\\git-shim',
+    'tools/git-shim'
+)
+$shimHits = @()
+foreach ($s in $shimSentinels) {
+    if ($omniCode -match [regex]::Escape($s)) { $shimHits += $s }
+}
+if ($shimHits.Count -eq 0) {
+    Add-Result 'no-git-shim-in-launcher' 'PASS' 'launcher does not reference a git shim'
+} else {
+    Add-Result 'no-git-shim-in-launcher' 'FAIL' ("launcher references shim sentinels: " + ($shimHits -join ', '))
+}
+
+$shimDir = Join-Path $workspace 'tools\git-shim'
+$shimBin = Join-Path $shimDir 'bin\git.exe'
+if (Test-Path -LiteralPath $shimBin) {
+    Add-Result 'no-git-shim-binary' 'FAIL' "shim binary present at $shimBin (delete tools\git-shim or rebuild branch without it)"
+} elseif (Test-Path -LiteralPath $shimDir) {
+    # Directory present but no built binary -- still a regression hazard.
+    Add-Result 'no-git-shim-binary' 'WARN' "tools\git-shim exists but contains no built git.exe; remove the directory entirely"
+} else {
+    Add-Result 'no-git-shim-binary' 'PASS' 'tools\git-shim absent'
+}
+
+# ---------------- 13. isolated skills directory under workspace ----------------
+# The isolated runtime should resolve its skills dir from CODEX_HOME, which
+# we point at .codex-omniroute-home\codex. If the directory exists and lives
+# under the workspace, that's a signal the runtime initialized inside the
+# isolated home rather than reaching back to the user's global ~\.codex\skills.
+$isolatedSkills = Join-Path $workspace (Join-Path $RuntimeHome 'codex\skills')
+$realUserCodex = Join-Path $realUserProfile '.codex'
+$globalSkills = Join-Path $realUserCodex 'skills'
+if (Test-Path -LiteralPath $isolatedSkills) {
+    $resolvedIsolated = (Resolve-Path -LiteralPath $isolatedSkills).Path
+    $resolvedGlobal = if (Test-Path -LiteralPath $globalSkills) { (Resolve-Path -LiteralPath $globalSkills).Path } else { $null }
+    if ($resolvedGlobal -and ($resolvedIsolated -ieq $resolvedGlobal)) {
+        Add-Result 'isolated-skills-under-workspace' 'FAIL' "isolated skills dir resolved to global $resolvedGlobal"
+    } else {
+        Add-Result 'isolated-skills-under-workspace' 'PASS' $resolvedIsolated
+    }
+} else {
+    # Skills dir may not exist yet on a brand-new isolated runtime that hasn't
+    # been driven by the GUI. Treat as informational.
+    Add-Result 'isolated-skills-under-workspace' 'WARN' "no $isolatedSkills yet (launch the GUI once to populate)"
+}
+
+# ---------------- 14. bridge.log free of MCP-transport noise ----------------
+# Look for any line that obviously cannot be a JSON-RPC frame and would
+# corrupt the MCP stdio transport if it ever showed up in an MCP child's
+# stdout. The bridge log is not the MCP transport itself, but if these
+# patterns appear here it's a strong signal the process tree is leaking
+# Windows process-management text into an inherited stdio chain.
+if (Test-Path -LiteralPath $bridgeLogFile) {
+    $logText = Read-Utf8Text -Path $bridgeLogFile
+    $noisePatterns = @(
+        'SUCCESS:\s+The process with PID',
+        'Failed to parse MCP message',
+        'Terminate batch job \(Y/N\)\?'
+    )
+    $noiseHits = @()
+    foreach ($p in $noisePatterns) {
+        if ($logText -and $logText -match $p) { $noiseHits += $p }
+    }
+    if ($noiseHits.Count -eq 0) {
+        Add-Result 'bridge-log-clean' 'PASS' 'no MCP-transport noise in bridge.log'
+    } else {
+        Add-Result 'bridge-log-clean' 'WARN' ("noise patterns observed in bridge.log: " + ($noiseHits -join ', '))
+    }
+} else {
+    Add-Result 'bridge-log-clean' 'WARN' "no $bridgeLogFile (bridge may not have logged yet)"
+}
+
+# ---------------- 15. MCP smoke (best-effort, opt-in via Python availability) ----------------
+$python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+$mcpSmoke = Join-Path $workspace 'tools\mcp_smoke_test.py'
+if ($python -and (Test-Path -LiteralPath $mcpSmoke)) {
+    try {
+        $smokeOutput = & $python.Source $mcpSmoke --isolated-config $isolatedConfig 2>&1
+        $smokeExit = $LASTEXITCODE
+        $detail = ($smokeOutput | Select-Object -First 1) -as [string]
+        if ($smokeExit -eq 0) {
+            Add-Result 'mcp-smoke' 'PASS' "exit=0 $detail"
+        } else {
+            Add-Result 'mcp-smoke' 'WARN' "exit=$smokeExit $detail"
+        }
+    } catch {
+        Add-Result 'mcp-smoke' 'WARN' ("mcp_smoke_test.py failed: " + $_.Exception.Message)
+    }
+} else {
+    $reason = if (-not $python) { 'python not on PATH' } else { 'mcp_smoke_test.py missing' }
+    Add-Result 'mcp-smoke' 'WARN' "skipped ($reason)"
+}
+
+# ---------------- 16. MCP per-server JSON-RPC probe ----------------
+# The smoke test only checks that each MCP server's command resolves on
+# PATH. The probe actually spawns each stdio MCP server and waits for a
+# JSON-RPC frame in response to an `initialize` request. This is what
+# catches the "12 MCPs configured but only 1 actually transports JSON-RPC"
+# failure mode that motivated the stdio shield.
+$node = Get-Command node -ErrorAction SilentlyContinue
+$mcpProbe = Join-Path $workspace 'tools\mcp_probe.mjs'
+if ($node -and (Test-Path -LiteralPath $mcpProbe) -and (Test-Path -LiteralPath $isolatedConfig)) {
+    try {
+        $probeOutput = & $node.Source $mcpProbe --isolated-config $isolatedConfig --timeout-ms 6000 2>&1
+        $probeExit = $LASTEXITCODE
+        Write-Host ""
+        Write-Host "[verify] MCP per-server probe output:" -ForegroundColor Cyan
+        foreach ($l in $probeOutput) { Write-Host "  $l" -ForegroundColor Gray }
+        $okCount = (@($probeOutput | Where-Object { $_ -match '^\[PASS\]' })).Count
+        $failCount = (@($probeOutput | Where-Object { $_ -match '^\[FAIL\]' })).Count
+        $skipCount = (@($probeOutput | Where-Object { $_ -match '^\[SKIP\]' })).Count
+        $dirty = (@($probeOutput | Where-Object { $_ -match 'transport_dirty' })).Count
+        $detail = "ok=$okCount fail=$failCount skip=$skipCount dirty=$dirty"
+        if ($probeExit -ne 0) {
+            Add-Result 'mcp-probe' 'WARN' "probe exit=$probeExit ($detail)"
+        } elseif ($failCount -eq 0) {
+            Add-Result 'mcp-probe' 'PASS' $detail
+        } elseif ($okCount -gt 0) {
+            Add-Result 'mcp-probe' 'WARN' "$detail -- some MCP servers failed to JSON-RPC handshake (see probe output above)"
+        } else {
+            Add-Result 'mcp-probe' 'FAIL' "$detail -- no MCP server responded with JSON-RPC (transport likely broken)"
+        }
+    } catch {
+        Add-Result 'mcp-probe' 'WARN' ("mcp_probe.mjs failed: " + $_.Exception.Message)
+    }
+} else {
+    $reason = if (-not $node) { 'node not on PATH' }
+              elseif (-not (Test-Path -LiteralPath $mcpProbe)) { 'mcp_probe.mjs missing' }
+              else { 'isolated config missing' }
+    Add-Result 'mcp-probe' 'WARN' "skipped ($reason)"
+}
+
+# ---------------- bridge OmniRoute traffic freshness ----------------
+# If bridge.log is present and nonempty, sanity-check that it does in fact
+# contain at least one OmniRoute /v1/responses log line. Absence is a soft
+# signal (no inference happened during this verifier run), so we only WARN.
+if (Test-Path -LiteralPath $bridgeLogFile) {
+    $logText2 = Read-Utf8Text -Path $bridgeLogFile
+    if ($logText2 -and $logText2 -match 'omniroute -> https?://') {
+        Add-Result 'bridge-log-has-omniroute' 'PASS' 'at least one omniroute -> ... line present'
+    } else {
+        Add-Result 'bridge-log-has-omniroute' 'WARN' 'no historical omniroute traffic in bridge.log (run a query in Codex to populate)'
+    }
 }
 
 # ---------------- 9. dictation base64 smoke ----------------
