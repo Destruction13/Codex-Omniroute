@@ -134,7 +134,25 @@ param(
     # to the shell-path and you will hit "Access is denied" again. Pass
     # -NoFreeformApplyPatch in that scenario to suppress the
     # experimental flag from the managed block.
-    [switch]$NoFreeformApplyPatch
+    [switch]$NoFreeformApplyPatch,
+
+    # Belt-and-suspenders fallback for the shell-path of apply_patch.
+    # Codex Desktop, on first launch, copies its bundled CLI toolkit
+    # (codex.exe, node.exe, rg.exe, codex-command-runner.exe, ...) into
+    # %LOCALAPPDATA%\OpenAI\Codex\bin\. Those copies live OUTSIDE
+    # WindowsApps and are therefore freely executable from any
+    # non-AppX child process. The launcher prepends that directory to
+    # Codex's PATH so that anywhere Codex (or its agent shells) resolve
+    # `codex.exe` via PATH lookup -- most notably the apply_patch.bat
+    # wrapper -- they hit the user-local copy first instead of the
+    # WindowsApps one that triggers Access Denied.
+    #
+    # This is the only PATH override the launcher does. It is strictly
+    # additive: the user's existing PATH is preserved unchanged after
+    # the prepend, so no other tool gets shadowed. The added directory
+    # is INSIDE our isolated runtime home so it cannot pollute outside.
+    # Pass -NoLocalCodexBinPath to skip.
+    [switch]$NoLocalCodexBinPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -816,7 +834,18 @@ function Write-IsolatedConfig {
     # any non-Start-menu launch (the AppX package identity does not
     # propagate to grand-children), so freeform is the workaround. Codex
     # 26.506.x supports the flag; binary scan in the verifier confirms it.
-    $freeformLine = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch = false (disabled by -NoFreeformApplyPatch)' }
+    #
+    # The flag is written in THREE places. Codex's config schema (per a
+    # binary scan of the bundled agent CLI) exposes the flag both at
+    # top-level, inside a `[features]` table, and per-profile inside
+    # `[profiles.<name>]`. Empirically a bare top-level placement alone
+    # does NOT activate the freeform tool when an explicit `profile = ...`
+    # is set (the profile section wins). Writing it in all three
+    # locations is harmless redundancy and guarantees that whichever
+    # placement Codex's parser actually honors is satisfied.
+    $freeformTopLevel  = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch = false (disabled by -NoFreeformApplyPatch)' }
+    $freeformFeatures  = if ($FreeformApplyPatch) { "[features]`nexperimental_use_freeform_apply_patch = true`n" } else { '' }
+    $freeformInProfile = if ($FreeformApplyPatch) { 'experimental_use_freeform_apply_patch = true' } else { '# experimental_use_freeform_apply_patch suppressed' }
 
     # Order matters here. The managed block ships its bare top-level scalars
     # FIRST so they land at the top of the file, before any [table] header.
@@ -833,8 +862,9 @@ model_provider = "omniroute_bridge"
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
 profile = "omniroute_managed"
-$freeformLine
+$freeformTopLevel
 
+$freeformFeatures
 [model_providers.omniroute_bridge]
 name = "OmniRoute Bridge"
 base_url = "http://127.0.0.1:$BridgePort/v1"
@@ -846,6 +876,7 @@ supports_websockets = false
 model_provider = "omniroute_bridge"
 model = "gpt-5.4"
 model_reasoning_effort = "xhigh"
+$freeformInProfile
 
 [projects."$projectEscaped"]
 trust_level = "trusted"
@@ -1165,11 +1196,49 @@ $codexEnv = [ordered]@{
     # Belt-and-suspenders: three different env vars Electron / Codex may read.
     CODEX_ELECTRON_USER_DATA_PATH = $runtime.ElectronData
     ELECTRON_USER_DATA_DIR        = $runtime.ElectronData
-    # PATH is intentionally NOT overridden here. Codex inherits the user's
-    # PATH unchanged so that git, node, npx, powershell.exe, and any MCP
-    # server commands resolve to exactly the same executables they would
-    # under official mode. Anything OmniRoute needs to point Codex at lives
-    # in the isolated config.toml or in the bridge -- never in PATH.
+}
+
+# Optionally prepend the isolated runtime's <LOCALAPPDATA>\OpenAI\Codex\bin
+# to PATH. Codex Desktop unpacks its own CLI toolkit there on first launch
+# (codex.exe + node.exe + rg.exe + codex-command-runner.exe, all identical
+# to the WindowsApps versions but living in a user-writable, ACL-permissive
+# directory). Without this prepend, anything in Codex that resolves
+# `codex.exe` via PATH -- most importantly apply_patch.bat, which is the
+# shell-path of the Codex apply_patch tool -- finds the WindowsApps copy
+# first and then hits "Access is denied" because that copy is invocable
+# only from inside the AppX activation context. With the prepend, PATH
+# lookups land on the user-local copies and the shell-path of apply_patch
+# works exactly the way Codex's bat wrapper expects.
+#
+# We are very intentional that this is the only PATH modification the
+# launcher does:
+#   - It is strictly ADDITIVE: the user's full prior PATH is appended
+#     unchanged afterwards, so no other tool gets shadowed.
+#   - The prepended directory lives entirely INSIDE the isolated runtime
+#     home, so it cannot pollute anything outside it.
+#   - The executables it points at are exact bit-identical copies of
+#     Codex's own bundled CLI -- this is not a shim or a wrapper, no
+#     semantics change.
+#
+# Even with the freeform apply_patch path active, leaving this on is
+# cheap insurance: any other tool that ends up resolving codex.exe via
+# PATH (debug helpers, future Codex versions, third-party MCP servers
+# that shell out to it) will still get a working binary.
+if (-not $NoLocalCodexBinPath) {
+    $localCodexBin = Join-Path $runtime.LocalApp 'OpenAI\Codex\bin'
+    if (-not (Test-Path -LiteralPath $localCodexBin)) {
+        New-Item -ItemType Directory -Path $localCodexBin -Force | Out-Null
+    }
+    $existingPath = [System.Environment]::GetEnvironmentVariable('PATH', 'Process')
+    if (-not $existingPath) { $existingPath = $env:PATH }
+    if ($existingPath -and ($existingPath.Split(';') -inotcontains $localCodexBin)) {
+        $codexEnv['PATH'] = $localCodexBin + ';' + $existingPath
+        Write-Host "[omniroute] prepended user-local Codex bin to PATH: $localCodexBin"
+    } else {
+        # Already in PATH or unset; do nothing.
+    }
+} else {
+    Write-Host "[omniroute] -NoLocalCodexBinPath: user-local Codex bin NOT added to PATH (apply_patch shell-path will fail with Access Denied)"
 }
 # --open-project tells Codex Desktop to open the workspace as a real
 # project-bound session. Without it Codex starts on the "Work in project"

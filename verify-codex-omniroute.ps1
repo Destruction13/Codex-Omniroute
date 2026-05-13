@@ -44,12 +44,19 @@
            - The bundled Codex agent CLI contains the string
              `experimental_use_freeform_apply_patch` (so the in-process patch
              path is actually plumbed through in the installed Codex version).
-           - The isolated config.toml has the flag set to true in the managed
-             block.
+           - The isolated config.toml has the flag set to true inside the
+             [profiles.omniroute_managed] block specifically (Codex empirically
+             honors the per-profile placement, not just the top-level one).
            - The active managed `model =` looks like a GPT-5 family model
              (freeform tools require grammar-supporting models; non-GPT-5
              silently falls back to the broken shell-path).
-       17. The MCP per-server JSON-RPC probe (tools/mcp_probe.mjs) reports
+       17. User-local Codex bin fallback:
+           - `<isolated>\profile\AppData\Local\OpenAI\Codex\bin\codex.exe`
+             exists (Codex Desktop materializes its CLI toolkit there on
+             first GUI launch).
+           - The launcher source contains the PATH-prepend logic and the
+             `-NoLocalCodexBinPath` opt-out.
+       18. The MCP per-server JSON-RPC probe (tools/mcp_probe.mjs) reports
            ok=N fail=0 for every stdio MCP entry.
 
     Optional live smokes (only run with -Live):
@@ -522,12 +529,23 @@ if ($pkg) {
 }
 
 if ($isoText) {
-    if ($isoText -match '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*true\b') {
-        Add-Result 'freeform-flag-set' 'PASS' "$freeformFlag = true is present in the managed block"
-    } elseif ($isoText -match '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*false\b') {
-        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = false (apply_patch will use shell-path; expected to fail with Access Denied)"
+    # Count how many DISTINCT placements of the flag we wrote. Codex accepts
+    # the flag at top-level, inside a [features] table, and per-profile
+    # inside [profiles.<name>]. Empirically the per-profile placement is
+    # what actually toggles the in-process tool when an explicit
+    # `profile = ...` is active, so verify at least one positive setting
+    # exists AND that the per-profile placement is present.
+    $allTrue = [regex]::Matches($isoText, '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*true\b').Count
+    $allFalse = [regex]::Matches($isoText, '(?im)^\s*experimental_use_freeform_apply_patch\s*=\s*false\b').Count
+    $profileBlockMatch = [regex]::Match($isoText, '(?ims)\[profiles\.omniroute_managed\][^\[]*?experimental_use_freeform_apply_patch\s*=\s*true')
+    if ($allTrue -gt 0 -and $profileBlockMatch.Success) {
+        Add-Result 'freeform-flag-set' 'PASS' "$freeformFlag = true present in [profiles.omniroute_managed] and $allTrue total placements"
+    } elseif ($allTrue -gt 0) {
+        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = true present at $allTrue place(s) but NOT inside [profiles.omniroute_managed] -- the profile section is the one Codex actually honors when a profile is selected; freeform tool may not activate"
+    } elseif ($allFalse -gt 0) {
+        Add-Result 'freeform-flag-set' 'WARN' "$freeformFlag = false (apply_patch will use shell-path)"
     } else {
-        Add-Result 'freeform-flag-set' 'FAIL' "$freeformFlag is missing from the isolated config (apply_patch will use shell-path)"
+        Add-Result 'freeform-flag-set' 'FAIL' "$freeformFlag is missing from the isolated config"
     }
 
     # Pull the managed-block model. It is the first `model = "..."` line
@@ -549,7 +567,35 @@ if ($isoText) {
     }
 }
 
-# ---------------- 20. MCP per-server JSON-RPC probe ----------------
+# ---------------- 20. user-local Codex bin invocability ----------------
+# Codex Desktop unpacks its CLI toolkit (codex.exe, node.exe, rg.exe,
+# codex-command-runner.exe, etc.) into <LOCALAPPDATA>\OpenAI\Codex\bin\
+# on first launch. Those copies are bit-identical to the WindowsApps
+# ones but live outside the AppX-protected directory, so they are
+# invocable from any non-AppX child shell. This is the fallback path
+# for `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` when
+# the freeform flag does not activate.
+#
+# We confirm the bin directory and the bundled `codex.exe` are present
+# inside the isolated runtime, and that the launcher prepended that
+# directory to Codex's PATH (unless -NoLocalCodexBinPath was passed).
+$localCodexBin = Join-Path $workspace (Join-Path $RuntimeHome 'profile\AppData\Local\OpenAI\Codex\bin')
+$localCodexExe = Join-Path $localCodexBin 'codex.exe'
+if (Test-Path -LiteralPath $localCodexExe) {
+    Add-Result 'local-codex-bin-present' 'PASS' $localCodexExe
+} else {
+    Add-Result 'local-codex-bin-present' 'WARN' "no codex.exe yet under $localCodexBin (Codex Desktop materializes this on first GUI launch; verify after the next non-NoCodex run)"
+}
+
+if ($omniRaw) {
+    if ($omniRaw -match '(?im)NoLocalCodexBinPath' -and $omniRaw -match '\$localCodexBin\s*\+\s*'';''\s*\+\s*\$existingPath') {
+        Add-Result 'local-codex-bin-path-logic' 'PASS' 'launcher prepends user-local Codex bin to PATH (default ON; -NoLocalCodexBinPath to disable)'
+    } else {
+        Add-Result 'local-codex-bin-path-logic' 'WARN' 'launcher does not appear to prepend user-local Codex bin to PATH (apply_patch shell-path may fail with Access Denied)'
+    }
+}
+
+# ---------------- 21. MCP per-server JSON-RPC probe ----------------
 # The smoke test only checks that each MCP server's command resolves on
 # PATH. The probe actually spawns each stdio MCP server and waits for a
 # JSON-RPC frame in response to an `initialize` request. This is what
