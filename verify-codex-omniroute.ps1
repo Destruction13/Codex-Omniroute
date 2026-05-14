@@ -55,6 +55,12 @@ param(
 $ErrorActionPreference = 'Continue'
 Set-StrictMode -Version Latest
 
+# Pre-seed $LASTEXITCODE so Set-StrictMode -Latest never trips on it
+# before any external command has actually run. The verifier reads
+# $LASTEXITCODE after every & call, and a strict-mode error here would
+# crash Setup.bat instead of just reporting a FAIL row.
+$global:LASTEXITCODE = 0
+
 $results = New-Object System.Collections.Generic.List[object]
 function Add-Result {
     param([string]$Name, [string]$Status, [string]$Detail = '')
@@ -88,16 +94,19 @@ Write-Host ""
 Write-Host "[verify] Starting OmniRoute bridge (no Codex GUI)" -ForegroundColor Cyan
 
 $launcherOk = $false
+$launcherExit = $null
 try {
     & pwsh -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort
-    $launcherOk = ($LASTEXITCODE -eq 0)
+    $launcherExit = $LASTEXITCODE
+    $launcherOk = ($launcherExit -eq 0)
 } catch {
     $launcherOk = $false
 }
+$launcherExitForMsg = if ($null -eq $launcherExit) { 'n/a' } else { "$launcherExit" }
 if ($launcherOk) {
     Add-Result 'omniroute-launcher-nocodex' 'PASS' "Start-Codex-OmniRoute.ps1 -NoCodex exited 0"
 } else {
-    Add-Result 'omniroute-launcher-nocodex' 'FAIL' "Start-Codex-OmniRoute.ps1 -NoCodex failed (exit=$LASTEXITCODE)"
+    Add-Result 'omniroute-launcher-nocodex' 'FAIL' "Start-Codex-OmniRoute.ps1 -NoCodex failed (exit=$launcherExitForMsg)"
     Write-Host ($results | Format-Table | Out-String)
     exit 1
 }

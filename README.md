@@ -157,12 +157,11 @@ You need two values: a `base_url` and an `api_key`. They are issued out-of-band 
 In the unzipped repo folder, **double-click `Setup.bat`**. The wizard:
 
 1. Verifies that Codex (Microsoft Store) and Node.js (`>= 18.18`) are installed. If anything is missing, it prints a direct download link.
-2. Asks for your OmniRoute `base_url` (echoes to the terminal) and `api_key` (input is hidden).
-3. Optionally asks for a custom `model_prefix` (default `cx/`) and whether to enable GPT-5.5 connection-ID pinning.
-4. Writes `omniroute-provider.json` (already in `.gitignore`).
-5. Runs `verify-codex-omniroute.ps1 -NoCodex` and prints a `PASS`/`FAIL` table.
+2. Asks for your OmniRoute `base_url` (echoes to the terminal) and `api_key` (input is hidden). **Those are the only two questions.**
+3. Writes `omniroute-provider.json` (already in `.gitignore`) with sane defaults for everything else (`model_prefix = "cx/"`, `default_model = "gpt-5.4"`, `gpt55_pin.enabled = false`). If you ever need to tweak those advanced fields, edit the JSON file by hand.
+4. Runs `verify-codex-omniroute.ps1 -NoCodex` and prints a `PASS`/`FAIL` table.
 
-If the table ends with `OK Verifier passed`, you're done.
+If the table ends with `OK Verifier passed`, you're done. Even if the verifier reports `WARN`/`FAIL`, the config has been written and you can proceed to `Start-Codex-OmniRoute.bat`.
 
 </td></tr>
 
