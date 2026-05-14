@@ -173,7 +173,18 @@ param(
     # The rewriter is opt-out via -NoApplyPatchRewriter. Disabling all
     # three defenses simultaneously means apply_patch will fail with
     # "Access is denied" inside the agent shell.
-    [switch]$NoApplyPatchRewriter
+    [switch]$NoApplyPatchRewriter,
+
+    # Microsoft Store packages can mark their WindowsApps payload with a
+    # conditional AppX ACL. Current Codex builds allow activation through the
+    # Start Menu broker but reject a direct Start-Process against
+    # ...\WindowsApps\OpenAI.Codex_...\app\Codex.exe with "Access is denied".
+    # OmniRoute mode needs direct CreateProcess semantics so Codex inherits the
+    # isolated CODEX_HOME / USERPROFILE / APPDATA environment. By default the
+    # launcher syncs the unmodified Store app payload into this workspace's
+    # isolated runtime home and starts that copy. Pass this switch only when
+    # debugging an older package that still allows direct WindowsApps launch.
+    [switch]$NoRuntimeAppCopy
 )
 
 $ErrorActionPreference = 'Stop'
@@ -232,6 +243,110 @@ function Resolve-CodexExecutable {
     # Backwards-compat shim: any caller that still expects an absolute path
     # to Codex.exe gets it. New launch path uses Start-CodexViaAppx instead.
     return (Resolve-CodexAppx).ExePath
+}
+
+function Test-IsUnderPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    return $fullPath.Equals($fullRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $fullPath.StartsWith($fullRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-CodexPayloadCopyComplete {
+    param(
+        [Parameter(Mandatory = $true)][string]$DestApp,
+        [Parameter(Mandatory = $true)][string]$PackageFullName
+    )
+
+    $destExe = Join-Path $DestApp 'Codex.exe'
+    $destAsar = Join-Path $DestApp 'resources\app.asar'
+    $destCli = Join-Path $DestApp 'resources\codex.exe'
+    $marker = Join-Path (Split-Path -Parent $DestApp) '.codex-payload-copy.json'
+    if (-not ((Test-Path -LiteralPath $destExe) -and (Test-Path -LiteralPath $destAsar) -and (Test-Path -LiteralPath $destCli))) {
+        return $false
+    }
+    try {
+        $meta = Get-Content -LiteralPath $marker -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        return [string]$meta.package_full_name -eq $PackageFullName
+    } catch {
+        return $false
+    }
+}
+
+function Sync-CodexRuntimePayloadCopy {
+    param(
+        [Parameter(Mandatory = $true)]$Appx,
+        [Parameter(Mandatory = $true)][string]$RuntimeRoot
+    )
+
+    $sourceApp = Join-Path $Appx.InstallLoc 'app'
+    if (-not (Test-Path -LiteralPath $sourceApp)) {
+        throw "[omniroute] Codex Store payload not found: $sourceApp"
+    }
+
+    $cacheRoot = Join-Path $RuntimeRoot 'appx-payload'
+    $copyRoot = Join-Path $cacheRoot $Appx.Package.PackageFullName
+    $destApp = Join-Path $copyRoot 'app'
+    $destExe = Join-Path $destApp 'Codex.exe'
+
+    if (-not (Test-IsUnderPath -Path $destApp -Root $cacheRoot)) {
+        throw "[omniroute] refusing to sync Codex payload outside runtime cache: $destApp"
+    }
+
+    if (Test-CodexPayloadCopyComplete -DestApp $destApp -PackageFullName $Appx.Package.PackageFullName) {
+        Write-Host "[omniroute] launch payload copy already current: $destExe"
+        return [pscustomobject]@{
+            ExePath = $destExe
+            Mode    = 'runtime-payload-copy'
+            Copied  = $false
+        }
+    }
+
+    New-Item -ItemType Directory -Path $destApp -Force | Out-Null
+    Write-Host "[omniroute] syncing launchable Codex payload copy..."
+    Write-Host "[omniroute]   from: $sourceApp"
+    Write-Host "[omniroute]   to:   $destApp"
+
+    $roboArgs = @(
+        $sourceApp,
+        $destApp,
+        '/MIR',
+        '/R:2',
+        '/W:1',
+        '/NFL',
+        '/NDL',
+        '/NJH',
+        '/NJS',
+        '/NP'
+    )
+    & robocopy.exe @roboArgs | Out-Null
+    $rc = $LASTEXITCODE
+    if ($rc -ge 8) {
+        throw "[omniroute] robocopy failed while syncing Codex payload (exit code $rc)."
+    }
+
+    if (-not (Test-Path -LiteralPath $destExe)) {
+        throw "[omniroute] Codex payload sync completed but Codex.exe is missing: $destExe"
+    }
+
+    $marker = Join-Path $copyRoot '.codex-payload-copy.json'
+    [pscustomobject]@{
+        package_full_name = $Appx.Package.PackageFullName
+        package_version   = [string]$Appx.Package.Version
+        install_location  = $Appx.InstallLoc
+        source_app        = $sourceApp
+        copied_at         = (Get-Date).ToString('o')
+    } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $marker -Encoding UTF8
+
+    return [pscustomobject]@{
+        ExePath = $destExe
+        Mode    = 'runtime-payload-copy'
+        Copied  = $true
+    }
 }
 
 # NOTE: this launcher does NOT use IApplicationActivationManager (AppX
@@ -298,6 +413,18 @@ function Resolve-CodexExecutable {
 # user's git config -- not in this launcher.
 function Get-OfficialCodexHome {
     return (Join-Path $env:USERPROFILE '.codex')
+}
+
+function Find-DownloadedAuthExport {
+    $downloads = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) 'Downloads'
+    if (-not (Test-Path -LiteralPath $downloads)) { return $null }
+
+    $candidate = Get-ChildItem -LiteralPath $downloads -Filter 'codex-auth-*.json' -File -Recurse -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if ($candidate) { return $candidate.FullName }
+
+    return $null
 }
 
 function Test-PortFree {
@@ -388,16 +515,24 @@ function Copy-MinimalSeed {
             throw "[omniroute] -AuthSource path not found: $AuthSource"
         }
         $resolvedAuthSource = (Resolve-Path -LiteralPath $AuthSource).Path
-        $authJsonInSource = Join-Path $resolvedAuthSource 'auth.json'
-        if (-not (Test-Path -LiteralPath $authJsonInSource)) {
-            throw "[omniroute] -AuthSource '$resolvedAuthSource' does not contain auth.json"
+        $sourceItem = Get-Item -LiteralPath $resolvedAuthSource -ErrorAction Stop
+        if ($sourceItem.PSIsContainer) {
+            $authJsonInSource = Join-Path $resolvedAuthSource 'auth.json'
+            if (-not (Test-Path -LiteralPath $authJsonInSource)) {
+                throw "[omniroute] -AuthSource '$resolvedAuthSource' does not contain auth.json"
+            }
+            $candModels    = Join-Path $resolvedAuthSource 'models_cache.json'
+            $candInstallId = Join-Path $resolvedAuthSource 'installation_id'
+            Write-Host "[omniroute] auth source override dir: $resolvedAuthSource"
+        } else {
+            $authJsonInSource = $resolvedAuthSource
+            $candModels = $null
+            $candInstallId = $null
+            Write-Host "[omniroute] auth source override file: $resolvedAuthSource"
         }
         $authSrc = $authJsonInSource
-        $candModels    = Join-Path $resolvedAuthSource 'models_cache.json'
-        $candInstallId = Join-Path $resolvedAuthSource 'installation_id'
-        if (Test-Path -LiteralPath $candModels)    { $modelsSrc    = $candModels }
-        if (Test-Path -LiteralPath $candInstallId) { $installIdSrc = $candInstallId }
-        Write-Host "[omniroute] auth source override: $resolvedAuthSource"
+        if ($candModels -and (Test-Path -LiteralPath $candModels)) { $modelsSrc = $candModels }
+        if ($candInstallId -and (Test-Path -LiteralPath $candInstallId)) { $installIdSrc = $candInstallId }
     } elseif (Test-Path -LiteralPath $OfficialHome) {
         $authSrc      = Join-Path $OfficialHome 'auth.json'
         $modelsSrc    = Join-Path $OfficialHome 'models_cache.json'
@@ -440,6 +575,9 @@ function Copy-MinimalSeed {
         if (-not (Test-Path -LiteralPath $dst)) {
             Copy-Item -LiteralPath $src -Destination $dst -Force
             Write-Host "[omniroute] seeded $f from $src"
+        } elseif ($AuthSource -and $f -eq 'auth.json') {
+            Copy-Item -LiteralPath $src -Destination $dst -Force
+            Write-Host "[omniroute] refreshed $f from $src"
         } else {
             Write-Host "[omniroute] $f already present in isolated runtime; not overwriting"
         }
@@ -966,9 +1104,20 @@ if (-not (Test-Path -LiteralPath $bridgeScript)) {
     }
 }
 
-$exe = Resolve-CodexExecutable
+$appx = Resolve-CodexAppx
+$exe = $appx.ExePath
+$launchExe = $exe
+$launchMode = 'windowsapps-direct'
 $officialHome = Get-OfficialCodexHome
 $officialConfig = Join-Path $officialHome 'config.toml'
+
+if (-not $AuthSource) {
+    $downloadedAuth = Find-DownloadedAuthExport
+    if ($downloadedAuth) {
+        $AuthSource = $downloadedAuth
+        Write-Host "[omniroute] auto-detected auth export: $downloadedAuth"
+    }
+}
 
 $runtime = New-IsolatedRuntimeHome -Root $RuntimeHome -Reset:$Reset
 Copy-MinimalSeed `
@@ -1111,7 +1260,9 @@ if ($DryRun) {
     Write-Host "[omniroute] DryRun -- not starting bridge or Codex."
     [pscustomobject]@{
         Mode                = 'omniroute'
-        Executable          = $exe
+        SourceExecutable    = $exe
+        LaunchExecutable    = if ($NoRuntimeAppCopy) { $exe } else { '<runtime payload copy, created on non-DryRun launch>' }
+        LaunchMode          = if ($NoRuntimeAppCopy) { 'windowsapps-direct' } else { 'runtime-payload-copy' }
         WorkspaceDir        = $workspace
         IsolatedRuntime     = $runtime
         BridgePort          = $port
@@ -1134,6 +1285,16 @@ if ($DryRun) {
         DryRun              = $true
     } | Format-List
     exit 0
+}
+
+if (-not $NoCodex) {
+    if ($NoRuntimeAppCopy) {
+        Write-Host "[omniroute] -NoRuntimeAppCopy: trying WindowsApps Codex.exe directly (may fail with Access Denied on current Store packages)."
+    } elseif ($exe -match '\\WindowsApps\\') {
+        $payloadCopy = Sync-CodexRuntimePayloadCopy -Appx $appx -RuntimeRoot $runtime.Root
+        $launchExe = $payloadCopy.ExePath
+        $launchMode = $payloadCopy.Mode
+    }
 }
 
 # Start the bridge as a detached workspace-managed child process.
@@ -1254,6 +1415,18 @@ $codexEnv = [ordered]@{
 # reference them regardless of whether -NoLocalCodexBinPath was passed.
 $localCodexBin = Join-Path $runtime.LocalApp 'OpenAI\Codex\bin'
 $localCodexExe = Join-Path $localCodexBin 'codex.exe'
+$payloadCodexExe = if ($launchMode -eq 'runtime-payload-copy') {
+    Join-Path (Split-Path -Parent $launchExe) 'resources\codex.exe'
+} else {
+    $null
+}
+$applyPatchCodexExe = if (Test-Path -LiteralPath $localCodexExe) {
+    $localCodexExe
+} elseif ($payloadCodexExe -and (Test-Path -LiteralPath $payloadCodexExe)) {
+    $payloadCodexExe
+} else {
+    $localCodexExe
+}
 $applyPatchWrapper = Join-Path $scriptRoot 'tools\apply_patch-wrapper.mjs'
 
 if (-not $NoLocalCodexBinPath) {
@@ -1285,7 +1458,7 @@ if (-not $NoLocalCodexBinPath) {
     if (Test-Path -LiteralPath $applyPatchWrapper) {
         $shimEscapedNode = $nodeExe.Replace('"', '\"')
         $shimEscapedWrap = $applyPatchWrapper.Replace('"', '\"')
-        $shimEscapedExe  = $localCodexExe.Replace('"', '\"')
+        $shimEscapedExe  = $applyPatchCodexExe.Replace('"', '\"')
         $shimContent = "@echo off`r`n`"$shimEscapedNode`" `"$shimEscapedWrap`" `"$shimEscapedExe`" %*`r`n"
     } else {
         # Wrapper missing: fall back to the naive form. Loses multi-line
@@ -1311,7 +1484,7 @@ codex.exe --codex-run-as-apply-patch %*
 # tmp directory and rewrites the bat in place to point at the user-local
 # (non-AppX-protected) codex.exe copy. This is the third defense layer.
 $rewriterPid = Join-Path $workspace 'apply-patch-rewriter.pid'
-if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
+if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $applyPatchCodexExe)) {
     $rewriterScript = Join-Path $scriptRoot 'tools\apply_patch-rewriter.mjs'
     if (-not (Test-Path -LiteralPath $rewriterScript)) {
         Write-Warning "[omniroute] apply_patch rewriter script missing: $rewriterScript"
@@ -1337,7 +1510,7 @@ if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
         # patches the bat's hardcoded WindowsApps path to the user-local
         # codex.exe -- which fixes Access Denied but leaves multi-line
         # arg passing at the mercy of cmd.exe.
-        $rwArgs = @($rewriterScript, $runtime.CodexHome, $localCodexExe)
+        $rwArgs = @($rewriterScript, $runtime.CodexHome, $applyPatchCodexExe)
         if (Test-Path -LiteralPath $applyPatchWrapper) {
             $rwArgs += $applyPatchWrapper
         }
@@ -1355,13 +1528,13 @@ if (-not $NoApplyPatchRewriter -and (Test-Path -LiteralPath $localCodexExe)) {
             Set-Content -LiteralPath $rewriterPid -Value $rwProc.Id -Encoding ASCII
             try { $rwProc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
             $wrapTag = if (Test-Path -LiteralPath $applyPatchWrapper) { ' wrapped-via=' + $applyPatchWrapper } else { '' }
-            Write-Host ("[omniroute] apply_patch rewriter daemon: pid={0} watching={1}\\tmp\\arg0  target={2}{3}" -f $rwProc.Id, $runtime.CodexHome, $localCodexExe, $wrapTag)
+            Write-Host ("[omniroute] apply_patch rewriter daemon: pid={0} watching={1}\\tmp\\arg0  target={2}{3}" -f $rwProc.Id, $runtime.CodexHome, $applyPatchCodexExe, $wrapTag)
         }
     }
 } elseif ($NoApplyPatchRewriter) {
     Write-Host "[omniroute] -NoApplyPatchRewriter: apply_patch.bat rewriter daemon NOT started (apply_patch.bat hardcoded path will trip Access Denied)"
 } else {
-    Write-Host "[omniroute] apply_patch rewriter daemon SKIPPED: user-local codex.exe not present yet at $localCodexExe (Codex Desktop materializes it on first GUI launch; rerun launcher afterwards to enable rewriter)"
+    Write-Host "[omniroute] apply_patch rewriter daemon SKIPPED: no non-AppX codex.exe available yet (looked at $localCodexExe and $payloadCodexExe)"
 }
 
 # --open-project tells Codex Desktop to open the workspace as a real
@@ -1387,7 +1560,7 @@ foreach ($kv in $codexEnv.GetEnumerator()) {
 
 $codexProc = $null
 try {
-    $codexProc = Start-Process -FilePath $exe -ArgumentList $codexArgs -WorkingDirectory $workspace -PassThru
+    $codexProc = Start-Process -FilePath $launchExe -ArgumentList $codexArgs -WorkingDirectory $workspace -PassThru
 } finally {
     foreach ($kv in $prevEnv.GetEnumerator()) {
         [System.Environment]::SetEnvironmentVariable($kv.Key, $kv.Value, 'Process')
@@ -1395,11 +1568,13 @@ try {
 }
 
 if (-not $codexProc) {
-    Write-Error "[omniroute] Start-Process returned no process for Codex.exe at $exe"
+    Write-Error "[omniroute] Start-Process returned no process for Codex.exe at $launchExe"
     exit 1
 }
 
-Write-Host ("[omniroute] launched Codex.exe pid={0} userdata={1}" -f $codexProc.Id, $runtime.ElectronData)
+Write-Host ("[omniroute] launched Codex.exe pid={0} mode={1} userdata={2}" -f $codexProc.Id, $launchMode, $runtime.ElectronData)
+Write-Host "[omniroute] source Codex.exe: $exe"
+Write-Host "[omniroute] launch Codex.exe: $launchExe"
 Write-Host "[omniroute] CLI args: $($codexArgs -join ' ')"
 Write-Host "[omniroute] isolated CODEX_HOME: $($runtime.CodexHome)"
 
@@ -1408,9 +1583,17 @@ Write-Host "[omniroute] isolated CODEX_HOME: $($runtime.CodexHome)"
 Start-Sleep -Seconds 2
 $codexProc.Refresh()
 if ($codexProc.HasExited) {
-    Write-Warning ("[omniroute] Codex.exe (pid={0}) exited within 2s with code {1}." -f $codexProc.Id, $codexProc.ExitCode)
-    Write-Warning "[omniroute]   Common causes: stale isolated profile (try -Reset), or env-var collision."
-    Write-Warning "[omniroute]   Check Windows Event Viewer -> Application logs for Codex.exe entries."
+    $sameLaunchExeProcesses = @(
+        Get-Process -Name 'Codex' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Id -ne $codexProc.Id -and $_.Path -and $_.Path.Equals($launchExe, [System.StringComparison]::OrdinalIgnoreCase) }
+    )
+    if ($codexProc.ExitCode -eq 0 -and $sameLaunchExeProcesses.Count -gt 0) {
+        Write-Host ("[omniroute] Codex.exe handoff process exited with code 0; existing runtime Codex process(es) still alive: {0}" -f (($sameLaunchExeProcesses | Select-Object -ExpandProperty Id) -join ', '))
+    } else {
+        Write-Warning ("[omniroute] Codex.exe (pid={0}) exited within 2s with code {1}." -f $codexProc.Id, $codexProc.ExitCode)
+        Write-Warning "[omniroute]   Common causes: stale isolated profile (try -Reset), or env-var collision."
+        Write-Warning "[omniroute]   Check Windows Event Viewer -> Application logs for Codex.exe entries."
+    }
 } else {
     Write-Host "[omniroute] Codex.exe alive after 2s (pid=$($codexProc.Id))."
 }

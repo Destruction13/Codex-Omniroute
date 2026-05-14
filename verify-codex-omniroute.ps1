@@ -570,7 +570,7 @@ if ($isoText) {
     }
 }
 
-# ---------------- 20. user-local Codex bin invocability ----------------
+# ---------------- 20. non-AppX Codex CLI invocability ----------------
 # Codex Desktop unpacks its CLI toolkit (codex.exe, node.exe, rg.exe,
 # codex-command-runner.exe, etc.) into <LOCALAPPDATA>\OpenAI\Codex\bin\
 # on first launch. Those copies are bit-identical to the WindowsApps
@@ -579,15 +579,23 @@ if ($isoText) {
 # for `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` when
 # the freeform flag does not activate.
 #
-# We confirm the bin directory and the bundled `codex.exe` are present
-# inside the isolated runtime, and that the launcher prepended that
-# directory to Codex's PATH (unless -NoLocalCodexBinPath was passed).
+# Newer Store packages block direct execution from WindowsApps entirely, so
+# the launcher also keeps an unmodified runtime payload copy under
+# <runtime>\appx-payload\...\app\. Its resources\codex.exe is equally
+# non-AppX and can back apply_patch before Codex materializes the user-local
+# bin directory.
 $localCodexBin = Join-Path $workspace (Join-Path $RuntimeHome 'profile\AppData\Local\OpenAI\Codex\bin')
 $localCodexExe = Join-Path $localCodexBin 'codex.exe'
+$payloadCodexExe = Get-ChildItem -LiteralPath (Join-Path $workspace (Join-Path $RuntimeHome 'appx-payload')) -Recurse -Filter 'codex.exe' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\app\\resources\\codex\.exe$' } |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
 if (Test-Path -LiteralPath $localCodexExe) {
     Add-Result 'local-codex-bin-present' 'PASS' $localCodexExe
+} elseif ($payloadCodexExe) {
+    Add-Result 'local-codex-bin-present' 'PASS' "user-local codex.exe not materialized yet; runtime payload CLI is available at $($payloadCodexExe.FullName)"
 } else {
-    Add-Result 'local-codex-bin-present' 'WARN' "no codex.exe yet under $localCodexBin (Codex Desktop materializes this on first GUI launch; verify after the next non-NoCodex run)"
+    Add-Result 'local-codex-bin-present' 'WARN' "no non-AppX codex.exe found under $localCodexBin or runtime appx-payload (run a non-NoCodex launch once)"
 }
 
 if ($omniRaw) {
