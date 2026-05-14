@@ -74,6 +74,25 @@ function Add-Result {
     Write-Host ("[{0}] {1}{2}" -f $Status, $Name, $(if ($Detail) { " -- $Detail" } else { '' })) -ForegroundColor $color
 }
 
+# Resolve a PowerShell host to invoke child scripts with. Prefer pwsh
+# (PowerShell 7+), fall back to the built-in Windows PowerShell. This
+# matches the fallback chain used by Setup.ps1 and the .bat launchers,
+# so a machine without pwsh installed still runs the verifier instead
+# of immediately FAIL-ing with exit=n/a.
+function Get-PSHost {
+    $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $cmd = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+$psHost = Get-PSHost
+if (-not $psHost) {
+    Add-Result 'powershell-host' 'FAIL' 'Neither pwsh nor powershell.exe is on PATH; verifier cannot spawn child shells.'
+    Write-Host ($results | Format-Table | Out-String)
+    exit 1
+}
+
 $scriptRoot   = $PSScriptRoot
 $omniLauncher = Join-Path $scriptRoot 'Start-Codex-OmniRoute.ps1'
 $offLauncher  = Join-Path $scriptRoot 'Start-Codex-Official.ps1'
@@ -96,7 +115,7 @@ Write-Host "[verify] Starting OmniRoute bridge (no Codex GUI)" -ForegroundColor 
 $launcherOk = $false
 $launcherExit = $null
 try {
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort
+    & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort
     $launcherExit = $LASTEXITCODE
     $launcherOk = ($launcherExit -eq 0)
 } catch {
@@ -201,7 +220,7 @@ if (Test-Path -LiteralPath $backupPath) {
 
 $officialOk = $true
 try {
-    $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $offLauncher -DryRun -NoAutoRestore 2>&1
+    $output = & $psHost -NoProfile -ExecutionPolicy Bypass -File $offLauncher -DryRun -NoAutoRestore 2>&1
     if ($LASTEXITCODE -ne 0) { $officialOk = $false }
     $joined = ($output | Out-String)
     # The official launcher must not reference OmniRoute or bridges anywhere in
@@ -285,7 +304,7 @@ if ($Live) {
 
 if (-not $LeaveBridgeRunning) {
     $backupBefore = if (Test-Path -LiteralPath $backupPath) { Get-Content -LiteralPath $backupPath -Raw } else { $null }
-    & pwsh -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -Restore | Out-Null
+    & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -Restore | Out-Null
     $restoreExit = $LASTEXITCODE
 
     $configAfter = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }

@@ -3,9 +3,11 @@ REM First-time setup wizard. Double-click this file.
 REM Checks prerequisites, asks for OmniRoute base_url + API key, writes
 REM omniroute-provider.json, runs the verifier. Safe to re-run.
 REM
-REM PowerShell 7+ (pwsh) is recommended but not required. If pwsh is not
-REM installed this script offers to install it via winget; declining or
-REM lacking winget falls back to the built-in Windows PowerShell cleanly.
+REM PowerShell 7+ (pwsh) is required by the launchers and verifier. If
+REM pwsh is not installed, this script auto-installs it via winget --
+REM no questions asked, since the project targets non-technical users.
+REM If winget is unavailable or the install fails, the script falls back
+REM to the built-in Windows PowerShell so setup can still proceed.
 
 setlocal ENABLEDELAYEDEXPANSION
 pushd "%~dp0"
@@ -17,32 +19,22 @@ if %ERRORLEVEL%==0 (
     goto :run_setup
 )
 
-REM ---- pwsh missing: explain + offer to install via winget --------------
+REM ---- pwsh missing: auto-install via winget if available ---------------
 echo.
 echo --------------------------------------------------------------------
 echo   PowerShell 7+ (pwsh) was not found on this machine.
-echo.
-echo   Codex OmniRoute works with the built-in Windows PowerShell, but
-echo   PowerShell 7+ has better Unicode handling and is the version we
-echo   test against. Installing it is recommended for non-technical
-echo   users so the launchers behave consistently.
+echo   Setup will install it for you so the launchers and verifier
+echo   behave consistently. You may see a UAC prompt.
 echo --------------------------------------------------------------------
 echo.
 
 where /q winget.exe
 if not %ERRORLEVEL%==0 (
-    echo   winget is not available on this machine, so we cannot offer an
-    echo   automatic install. If you want PowerShell 7+, download it from:
-    echo     https://aka.ms/powershell-release?tag=stable
-    echo   Otherwise the wizard will continue with the built-in PowerShell.
+    echo   winget is not available on this machine, so we cannot install
+    echo   PowerShell 7+ automatically. Continuing with the built-in
+    echo   Windows PowerShell. If anything misbehaves, install PowerShell 7+
+    echo   manually from https://aka.ms/powershell-release?tag=stable
     echo.
-    set "PS_EXE=powershell.exe"
-    goto :run_setup
-)
-
-set /p PWSH_INSTALL="Install PowerShell 7+ now via winget? [y/N]: "
-if /I not "%PWSH_INSTALL%"=="y" (
-    echo   Skipping PowerShell 7+ install. Continuing with built-in PowerShell.
     set "PS_EXE=powershell.exe"
     goto :run_setup
 )
@@ -61,17 +53,23 @@ if not %WINGET_RC%==0 (
     goto :run_setup
 )
 
-REM Re-detect after install; a fresh shell may be needed for PATH to refresh.
+REM Re-detect after install; a fresh shell may be needed for PATH to refresh,
+REM so also probe the canonical install path before giving up.
 where /q pwsh.exe
 if %ERRORLEVEL%==0 (
     echo   PowerShell 7+ installed successfully.
     set "PS_EXE=pwsh.exe"
-) else (
-    echo   PowerShell 7+ was installed but is not yet on this shell's PATH.
-    echo   Continuing with built-in PowerShell for this setup run. Next
-    echo   time you open a new terminal, pwsh will be available.
-    set "PS_EXE=powershell.exe"
+    goto :run_setup
 )
+if exist "%ProgramFiles%\PowerShell\7\pwsh.exe" (
+    echo   PowerShell 7+ installed successfully (resolved via canonical path).
+    set "PS_EXE=%ProgramFiles%\PowerShell\7\pwsh.exe"
+    goto :run_setup
+)
+echo   PowerShell 7+ was installed but is not yet on this shell's PATH.
+echo   Continuing with built-in PowerShell for this setup run. Next
+echo   time you open a new terminal, pwsh will be available.
+set "PS_EXE=powershell.exe"
 
 :run_setup
 echo.
