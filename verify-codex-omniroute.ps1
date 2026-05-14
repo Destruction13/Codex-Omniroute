@@ -14,16 +14,26 @@
          base_url pointing at the bridge port.
       5. A backup file ~/.codex/config.toml.codex-omniroute-backup exists
          (so -Restore is reversible).
-      6. Start-Codex-Official.ps1 -DryRun -NoAutoRestore resolves the Codex
+      6. The user's real ~/.codex/auth.json contains the OmniRoute managed
+         API-key sentinel (so Codex Desktop is in API-key auth mode and
+         actually uses the bridge for main reasoning instead of
+         bypassing it via the ChatGPT OAuth session).
+      7. A backup file ~/.codex/auth.json.codex-omniroute-backup exists
+         when the user had a pre-existing auth.json.
+      8. /healthz's managed_auth diagnostic reports the live auth.json
+         is the sentinel AND has no OAuth tokens left over (the explicit
+         "Desktop won't bypass us" check that motivates this whole file).
+      9. Start-Codex-Official.ps1 -DryRun -NoAutoRestore resolves the Codex
          package without trying to modify config or env.
-      7. The bridge responds to GET /v1/models with the local models cache
+     10. The bridge responds to GET /v1/models with the local models cache
          (or with a documented "models_cache_missing" error when the cache
          file is absent).
-      8. The dictation endpoint POST /transcribe is reachable (the bridge
+     11. The dictation endpoint POST /transcribe is reachable (the bridge
          does not 404 it).
-      9. Start-Codex-OmniRoute.ps1 -Restore stops the bridge and either
-         restores the original config.toml byte-for-byte from backup or
-         removes the managed-only config when there was no original.
+     12. Start-Codex-OmniRoute.ps1 -Restore stops the bridge and either
+         restores the original config.toml + auth.json byte-for-byte from
+         backup or removes the managed-only files when there was no
+         original.
 
     The old isolated-runtime invariants (payload copy, apply_patch
     rewriter, AppX alias junction, git shim absence, profile sanitization,
@@ -93,17 +103,35 @@ if (-not $psHost) {
     exit 1
 }
 
-$scriptRoot   = $PSScriptRoot
-$omniLauncher = Join-Path $scriptRoot 'Start-Codex-OmniRoute.ps1'
-$offLauncher  = Join-Path $scriptRoot 'Start-Codex-Official.ps1'
-$bridgePid    = Join-Path $scriptRoot 'bridge.pid'
-$bridgeLog    = Join-Path $scriptRoot 'bridge.log'
-$codexHome    = Join-Path $env:USERPROFILE '.codex'
-$configPath   = Join-Path $codexHome 'config.toml'
-$backupPath   = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
+$scriptRoot     = $PSScriptRoot
+$omniLauncher   = Join-Path $scriptRoot 'Start-Codex-OmniRoute.ps1'
+$offLauncher    = Join-Path $scriptRoot 'Start-Codex-Official.ps1'
+$bridgePid      = Join-Path $scriptRoot 'bridge.pid'
+$bridgeLog      = Join-Path $scriptRoot 'bridge.log'
+# USERPROFILE is Windows-only; on Linux / macOS the verifier still runs as
+# a smoke. Fall back to $HOME so the bridge / launcher (which themselves
+# use os.homedir() / $env:USERPROFILE with the same fallback) see the same
+# directory the verifier inspects.
+$codexHomeRoot  = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
+$codexHome      = Join-Path $codexHomeRoot '.codex'
+$configPath     = Join-Path $codexHome 'config.toml'
+$backupPath     = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
+$authPath       = Join-Path $codexHome 'auth.json'
+$authBackupPath = Join-Path $codexHome 'auth.json.codex-omniroute-backup'
 
 $ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
 $ManagedBlockEnd   = '# <<< codex-omniroute-managed'
+$ManagedAuthSentinelApiKey = 'sk-omniroute-managed'
+
+# Snapshot whether the user had a real auth.json BEFORE the launcher ran.
+# The backup file is the only way the verifier can distinguish:
+#   - "no original auth.json existed" (backup is empty, expected after restore: no live file)
+# from:
+#   - "user had a real auth.json" (backup has content, expected after restore: file matches backup).
+# We have to read this *before* invoking the launcher because the launcher
+# is what creates the backup.
+$authPreExisted = Test-Path -LiteralPath $authPath
+$authPreContent = if ($authPreExisted) { Get-Content -LiteralPath $authPath -Raw } else { $null }
 
 # ----------------------------------------------------------------------------
 # 1. Launch the bridge (no Codex GUI)
@@ -215,6 +243,108 @@ if (Test-Path -LiteralPath $backupPath) {
 }
 
 # ----------------------------------------------------------------------------
+# 6a. Managed auth.json (API-key sentinel)
+# ----------------------------------------------------------------------------
+#
+# This is the core invariant for the bridge-bypass fix. Codex Desktop only
+# routes /v1/responses through our bridge when it is in API-key auth mode,
+# which it picks based on the contents of ~/.codex/auth.json. So the
+# verifier MUST see:
+#   - the live ~/.codex/auth.json exists,
+#   - parses as JSON,
+#   - has OPENAI_API_KEY == sk-omniroute-managed,
+#   - has tokens == null (i.e. no leftover OAuth/ChatGPT session that
+#     would tempt Desktop back into the OAuth path).
+$authParsed = $null
+$authPresent = Test-Path -LiteralPath $authPath
+if ($authPresent) {
+    try {
+        $authRaw = Get-Content -LiteralPath $authPath -Raw
+        if (-not [string]::IsNullOrWhiteSpace($authRaw)) {
+            $authParsed = $authRaw | ConvertFrom-Json -ErrorAction Stop
+        }
+    } catch {
+        Add-Result 'auth-managed-form' 'FAIL' "auth.json present but not valid JSON: $($_.Exception.Message)"
+        $authParsed = $null
+    }
+}
+if (-not $authPresent) {
+    Add-Result 'auth-managed-form' 'FAIL' "auth.json not found at $authPath (Desktop will fall back to default OAuth flow)"
+} elseif ($null -ne $authParsed) {
+    $authKey = $null
+    $authTokens = '__unset__'
+    try { $authKey = $authParsed.OPENAI_API_KEY } catch { }
+    try { $authTokens = $authParsed.tokens } catch { }
+    $keyOk = ([string]$authKey -eq $ManagedAuthSentinelApiKey)
+    $tokensOk = ($null -eq $authTokens)
+    if ($keyOk -and $tokensOk) {
+        Add-Result 'auth-managed-form' 'PASS' "OPENAI_API_KEY=sentinel, tokens=null (Desktop is in API-key auth mode)"
+    } else {
+        $why = @()
+        if (-not $keyOk)   { $why += "OPENAI_API_KEY != sentinel" }
+        if (-not $tokensOk){ $why += "tokens is not null (OAuth session still present)" }
+        Add-Result 'auth-managed-form' 'FAIL' ($why -join '; ')
+    }
+}
+
+# ----------------------------------------------------------------------------
+# 6b. auth.json backup exists when the user had a pre-existing auth.json
+# ----------------------------------------------------------------------------
+if ($authPreExisted) {
+    if (Test-Path -LiteralPath $authBackupPath) {
+        Add-Result 'auth-backup' 'PASS' "$authBackupPath present (will be restored on -Restore / Official mode)"
+    } else {
+        Add-Result 'auth-backup' 'FAIL' "user had auth.json before launch but no backup was created at $authBackupPath"
+    }
+} else {
+    # No user auth.json before launch. The launcher still creates a
+    # zero-byte backup as the "no original existed" sentinel, so -Restore
+    # knows to DELETE the managed file rather than leave it in place. We
+    # accept either the empty backup or no backup (some host filesystems
+    # might choose to omit it); both are recoverable.
+    if (Test-Path -LiteralPath $authBackupPath) {
+        $abLen = (Get-Item -LiteralPath $authBackupPath).Length
+        if ($abLen -eq 0) {
+            Add-Result 'auth-backup' 'PASS' "empty backup sentinel (no original auth.json existed)"
+        } else {
+            Add-Result 'auth-backup' 'WARN' "no original auth.json existed but backup has content (length=$abLen)"
+        }
+    } else {
+        Add-Result 'auth-backup' 'WARN' "no pre-existing auth.json and no backup; -Restore will remove the managed file in place"
+    }
+}
+
+# ----------------------------------------------------------------------------
+# 6c. Diagnostic: bridge confirms Desktop will NOT bypass via OAuth session
+# ----------------------------------------------------------------------------
+#
+# /healthz inspects the live ~/.codex/auth.json itself (independent of
+# whatever path the bridge was told to use for the official fallback) and
+# reports two flags: sentinel_present and oauth_tokens_present. This is
+# what catches the "we forgot to write auth.json, Desktop is still in
+# ChatGPT-session mode" regression that motivated this whole effort.
+$diagPass = $false
+$diagDetail = ''
+if ($health -and $health.managed_auth) {
+    $sentinelPresent = [bool]$health.managed_auth.sentinel_present
+    $oauthPresent    = [bool]$health.managed_auth.oauth_tokens_present
+    if ($sentinelPresent -and (-not $oauthPresent)) {
+        $diagPass = $true
+        $diagDetail = "live auth.json has sentinel and no OAuth tokens"
+    } else {
+        $why = @()
+        if (-not $sentinelPresent) { $why += "sentinel not in live auth.json" }
+        if ($oauthPresent)         { $why += "live auth.json STILL has tokens.access_token (Desktop will bypass bridge)" }
+        $diagDetail = $why -join '; '
+    }
+}
+if ($diagPass) {
+    Add-Result 'desktop-not-stuck-in-oauth' 'PASS' $diagDetail
+} else {
+    Add-Result 'desktop-not-stuck-in-oauth' 'FAIL' ($diagDetail | ForEach-Object { if ($_) { $_ } else { 'no managed_auth diagnostic in /healthz response' } })
+}
+
+# ----------------------------------------------------------------------------
 # 7. Official launcher DryRun (with -NoAutoRestore so we don't wipe managed state)
 # ----------------------------------------------------------------------------
 
@@ -318,13 +448,17 @@ if ($Live) {
 # ----------------------------------------------------------------------------
 
 if (-not $LeaveBridgeRunning) {
-    $backupExistedBefore = Test-Path -LiteralPath $backupPath
+    $backupExistedBefore     = Test-Path -LiteralPath $backupPath
+    $authBackupExistedBefore = Test-Path -LiteralPath $authBackupPath
     & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -Restore | Out-Null
     $restoreExit = $LASTEXITCODE
 
-    $configAfter = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }
-    $backupGone  = -not (Test-Path -LiteralPath $backupPath)
-    $bridgeGone  = -not (Test-Path -LiteralPath $bridgePid)
+    $configAfter    = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }
+    $authAfterExist = Test-Path -LiteralPath $authPath
+    $authAfter      = if ($authAfterExist) { Get-Content -LiteralPath $authPath -Raw } else { $null }
+    $backupGone     = -not (Test-Path -LiteralPath $backupPath)
+    $authBackupGone = -not (Test-Path -LiteralPath $authBackupPath)
+    $bridgeGone     = -not (Test-Path -LiteralPath $bridgePid)
 
     # Semantic restore check (was: byte-for-byte equality with the backup).
     # The launcher always reads the backup as a .NET string and re-writes it
@@ -354,14 +488,59 @@ if (-not $LeaveBridgeRunning) {
         }
     }
 
-    if ($restoreExit -eq 0 -and $blockGone -and $backupGone -and $bridgeGone) {
-        Add-Result 'restore-roundtrip' 'PASS' 'managed block removed, backup cleared, bridge stopped'
+    # auth.json side of the round-trip:
+    #   - the managed sentinel must be gone (whether by restoring the
+    #     original from backup or by deleting the file entirely),
+    #   - the auth backup file itself must be consumed,
+    #   - if a non-empty backup existed BEFORE restore, the live
+    #     auth.json must exist again afterwards (we recovered the user's
+    #     OAuth session); if no original existed, the live file should be
+    #     deleted.
+    $authSentinelGone = $true
+    if ($authAfterExist -and $null -ne $authAfter -and $authAfter.Contains($ManagedAuthSentinelApiKey)) {
+        $authSentinelGone = $false
+    }
+    $authRestoredCorrectly = $true
+    $authReason = ''
+    if ($authPreExisted) {
+        # User had a real auth.json -- after restore the live file should
+        # exist again and (best effort) match the snapshot we took before
+        # the launcher ran.
+        if (-not $authAfterExist) {
+            $authRestoredCorrectly = $false
+            $authReason = 'user had auth.json before launch but it is missing after restore'
+        } elseif ($null -ne $authPreContent -and $authAfter -ne $authPreContent) {
+            # Mismatch: still count as PASS as long as the sentinel is gone
+            # (mirrors the config check above which is semantic, not
+            # byte-for-byte), but surface the diff in the detail.
+            $authReason = 'live auth.json differs from pre-launch snapshot but sentinel is gone (semantic restore)'
+        }
+    } else {
+        # No original auth.json -- after restore the live file should be
+        # absent (the launcher removes the managed sentinel file when
+        # the backup is empty).
+        if ($authAfterExist -and (-not $authSentinelGone)) {
+            $authRestoredCorrectly = $false
+            $authReason = 'managed sentinel auth.json still present (no original existed)'
+        }
+    }
+
+    $allOk = ($restoreExit -eq 0) -and $blockGone -and $backupGone -and `
+             $authSentinelGone -and $authBackupGone -and $authRestoredCorrectly -and $bridgeGone
+
+    if ($allOk) {
+        $detail = 'managed block removed, config backup cleared, auth.json restored, auth backup cleared, bridge stopped'
+        if ($authReason) { $detail += " ($authReason)" }
+        Add-Result 'restore-roundtrip' 'PASS' $detail
     } else {
         $why = @()
-        if ($restoreExit -ne 0) { $why += "exit=$restoreExit" }
-        if (-not $blockGone)    { $why += 'managed block still present in config' }
-        if (-not $backupGone)   { $why += 'backup file still present' }
-        if (-not $bridgeGone)   { $why += 'bridge.pid still present' }
+        if ($restoreExit -ne 0)         { $why += "exit=$restoreExit" }
+        if (-not $blockGone)            { $why += 'managed block still present in config' }
+        if (-not $backupGone)           { $why += 'config backup file still present' }
+        if (-not $authSentinelGone)     { $why += 'sentinel API key still in live auth.json' }
+        if (-not $authBackupGone)       { $why += 'auth backup file still present' }
+        if (-not $authRestoredCorrectly){ $why += "auth.json restore wrong: $authReason" }
+        if (-not $bridgeGone)           { $why += 'bridge.pid still present' }
         Add-Result 'restore-roundtrip' 'FAIL' ($why -join '; ')
     }
 }
