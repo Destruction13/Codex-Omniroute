@@ -5,7 +5,7 @@ Day-to-day usage notes, debugging recipes, and answers to "what if".
 ## First-time setup checklist
 
 - [ ] Microsoft Store Codex app installed, signed in once, opened at least once (so `%USERPROFILE%\.codex\auth.json` and `models_cache.json` exist).
-- [ ] PowerShell 7+ available (`pwsh.exe`). Windows PowerShell 5.1 (`powershell.exe`) also works.
+- [ ] PowerShell 7+ available (`pwsh.exe`) is **recommended but not required**. Windows PowerShell 5.1 (`powershell.exe`) also works — `Setup.bat` offers to install PS 7+ via `winget` and the `.bat` launchers auto-prefer `pwsh` when present.
 - [ ] Node.js 18.18+ on `PATH` (`node --version`).
 - [ ] OmniRoute reachable (locally, via SSH tunnel, or remote). One of:
       - `$env:OMNIROUTE_BASE_URL` + `$env:OMNIROUTE_API_KEY`

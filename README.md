@@ -419,7 +419,7 @@ This section is for users who want to bypass the wizard and configure the provid
    ```
    The repo never includes the tunnel command or its credentials.
 
-The launchers tolerate either Windows PowerShell 5.1 (the default `powershell.exe`) or PowerShell 7+ (`pwsh.exe`). The `.bat` shims invoke 5.1 by default, which is fine for everything in this repo.
+The launchers work on both Windows PowerShell 5.1 (the default `powershell.exe`) and PowerShell 7+ (`pwsh.exe`). PowerShell 7+ is **recommended but not required** — the `.bat` shims auto-prefer `pwsh.exe` when it's on `PATH` and fall back to `powershell.exe` otherwise. `Setup.bat` will offer to install PowerShell 7+ via `winget` if it's missing, and continues with the built-in PowerShell if you decline.
 
 </details>
 

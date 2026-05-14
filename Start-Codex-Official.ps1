@@ -42,7 +42,31 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# Strict-mode-safe Windows-host detection. Touching `$IsWindows` directly
+# fails on Windows PowerShell 5.x (the variable is undefined and strict-mode
+# treats that as an error). Mirrors Test-WindowsHost in
+# Start-Codex-OmniRoute.ps1; duplicated here so the official launcher has no
+# dependency on the OmniRoute one.
+function Test-WindowsHost {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { return $true }
+    $winVar = Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue
+    if ($winVar) { return [bool]$winVar.Value }
+    if ($env:OS -eq 'Windows_NT') { return $true }
+    return $false
+}
+
 function Resolve-CodexAppx {
+    if (-not (Test-WindowsHost)) {
+        # Allow -DryRun on non-Windows (CI / verifier) without trying to call
+        # Get-AppxPackage (which only exists on Windows). The real activation
+        # path is Windows-only anyway.
+        return [pscustomobject]@{
+            AumId      = 'NON-WINDOWS-STUB!App'
+            ExePath    = '/dev/null'
+            InstallLoc = '/dev/null'
+            Package    = $null
+        }
+    }
     $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
     if (-not $pkg) {
         throw "Official Codex Microsoft Store app is not installed (Get-AppxPackage OpenAI.Codex returned nothing). Install it from the Microsoft Store first."

@@ -109,10 +109,45 @@ $ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit
 $ManagedBlockEnd   = '# <<< codex-omniroute-managed'
 
 # ----------------------------------------------------------------------------
+# Host platform detection
+#
+# Touching `$IsWindows` directly is unsafe: Windows PowerShell 5.x does not
+# define it, and under `Set-StrictMode -Version Latest` an undefined variable
+# is a hard error. This helper resolves the host platform without ever
+# evaluating `$IsWindows` in a way that the strict-mode parser would reject.
+# It returns $true on:
+#   - Windows PowerShell 5.x (PSEdition = 'Desktop' is Windows-only by design)
+#   - PowerShell 7+ on Windows ($IsWindows = $true, fetched via Get-Variable)
+#   - any other host where %OS% is reported as Windows_NT
+# and $false on PowerShell 7+ on Linux/macOS (used by CI / verification).
+# ----------------------------------------------------------------------------
+
+function Test-WindowsHost {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') { return $true }
+    $winVar = Get-Variable -Name 'IsWindows' -ErrorAction SilentlyContinue
+    if ($winVar) { return [bool]$winVar.Value }
+    if ($env:OS -eq 'Windows_NT') { return $true }
+    return $false
+}
+
+# ----------------------------------------------------------------------------
 # AppX resolution + activation (same pattern as Start-Codex-Official.ps1)
 # ----------------------------------------------------------------------------
 
 function Resolve-CodexAppx {
+    if (-not (Test-WindowsHost)) {
+        # The verifier and CI run the launcher under pwsh on Linux/macOS for
+        # smoke/dry-run; Get-AppxPackage does not exist there. Return a stub
+        # so the rest of the script (bridge spin-up + config patching) is
+        # still exercised. Activation is skipped automatically because
+        # `-NoCodex` is the only realistic non-Windows code path.
+        return [pscustomobject]@{
+            AumId      = 'NON-WINDOWS-STUB!App'
+            ExePath    = '/dev/null'
+            InstallLoc = '/dev/null'
+            Package    = $null
+        }
+    }
     $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
     if (-not $pkg) {
         throw "Official Codex Microsoft Store app is not installed (Get-AppxPackage OpenAI.Codex returned nothing). Install it from the Microsoft Store first."
@@ -602,7 +637,7 @@ try {
         WorkingDirectory = $scriptRoot
         PassThru         = $true
     }
-    if ($IsWindows -or ($null -eq $IsWindows -and $env:OS -eq 'Windows_NT')) {
+    if (Test-WindowsHost) {
         $startArgs['WindowStyle'] = 'Hidden'
     }
     $proc = Start-Process @startArgs
