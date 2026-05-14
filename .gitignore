@@ -1,6 +1,7 @@
 # Codex OmniRoute — never commit runtime/auth state
 
-# Isolated runtime homes (per-workspace Codex profile)
+# Legacy isolated runtime homes (left over from earlier architecture
+# revisions; harmless to keep ignored so old workspaces stay clean).
 .codex-omniroute-home/
 .codex-omniroute-home-*/
 

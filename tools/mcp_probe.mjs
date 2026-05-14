@@ -2,9 +2,10 @@
 /*
  * Codex OmniRoute -- per-server MCP probe.
  *
- * Reads an isolated runtime config.toml, walks every [mcp_servers.<name>]
- * entry, spawns it the way Codex would (`command` + `args`, plus the
- * sub-table [mcp_servers.<name>.env] merged into the child env), sends a
+ * Reads a Codex config.toml (by default ~/.codex/config.toml), walks every
+ * [mcp_servers.<name>] entry, spawns it the way Codex would (`command` +
+ * `args`, plus the sub-table [mcp_servers.<name>.env] merged into the
+ * child env), sends a
  * single JSON-RPC `initialize` frame on the child's stdin, waits up to a
  * configurable timeout for a JSON-RPC response on the child's stdout, and
  * reports per-server status:
@@ -20,7 +21,7 @@
  * crash on init) which the smoke test cannot.
  *
  * Usage:
- *   node mcp_probe.mjs --isolated-config <path-to-config.toml>
+ *   node mcp_probe.mjs [--config <path-to-config.toml>]
  *                      [--timeout-ms 5000]
  *                      [--server <name>]
  *                      [--json]
@@ -29,28 +30,28 @@
  * verifier interprets the output and decides whether to PASS / WARN / FAIL.
  */
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import process from "node:process";
 
 const argv = process.argv.slice(2);
-const opts = { isolatedConfig: "", timeoutMs: 5000, server: null, json: false };
+const opts = { configPath: "", timeoutMs: 5000, server: null, json: false };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === "--isolated-config") opts.isolatedConfig = argv[++i];
+  if (a === "--config" || a === "--isolated-config") opts.configPath = argv[++i];
   else if (a === "--timeout-ms") opts.timeoutMs = parseInt(argv[++i], 10) || 5000;
   else if (a === "--server") opts.server = argv[++i];
   else if (a === "--json") opts.json = true;
   else if (a === "-h" || a === "--help") {
     process.stdout.write(
-      "Usage: node mcp_probe.mjs --isolated-config <path> [--timeout-ms N] [--server NAME] [--json]\n",
+      "Usage: node mcp_probe.mjs [--config <path>] [--timeout-ms N] [--server NAME] [--json]\n",
     );
     process.exit(0);
   }
 }
-if (!opts.isolatedConfig) {
-  process.stderr.write("error: --isolated-config is required\n");
-  process.exit(64);
+if (!opts.configPath) {
+  opts.configPath = path.join(os.homedir(), ".codex", "config.toml");
 }
 
 // ---------- minimal TOML parser, scoped to mcp_servers.* sections ----------
@@ -302,7 +303,7 @@ function probeServer(name, defn, timeoutMs) {
 // ---------- main ----------
 
 async function main() {
-  const text = fs.readFileSync(opts.isolatedConfig, "utf8");
+  const text = fs.readFileSync(opts.configPath, "utf8");
   const servers = parseConfig(text);
   const names = opts.server ? [opts.server] : Object.keys(servers);
   const results = [];

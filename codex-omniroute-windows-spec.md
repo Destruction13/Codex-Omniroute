@@ -4,9 +4,9 @@ This document is the **authoritative spec** anyone re-implementing or auditing C
 
 ## 1. Goal
 
-Reproduce the success of "official Codex binary + isolated runtime home + local bridge". The official Microsoft Store Codex app must remain the user-facing application. Only the main reasoning path is rerouted to OmniRoute.
+Reroute Codex Desktop's main reasoning calls to OmniRoute without taking over anything else. The official Microsoft Store Codex app must remain the user-facing application, must keep its package identity, and must continue to see the user's normal Windows profile (`%USERPROFILE%`, `%APPDATA%`, `~/.codex/`, Documents, Desktop, projects, git config, SSH keys).
 
-**Out of scope**: rebuilding the Codex UI, patching or replacing the Store package, decompiling official binaries, or writing OmniRoute config into the user's global `%USERPROFILE%\.codex\config.toml`.
+**Out of scope**: rebuilding the Codex UI, patching or replacing the Store package, decompiling official binaries, or sandboxing/isolating the user's profile in any way.
 
 ## 2. Modes
 
@@ -14,160 +14,149 @@ There are exactly two modes, both launched from this workspace:
 
 ### 2.1 Official mode
 `Start-Codex-Official.ps1`. Clean baseline:
-- Resolves `app\Codex.exe` from `Get-AppxPackage OpenAI.Codex`.
-- Inherits the user's normal environment.
+- Resolves the Codex package and its `App` AUMID dynamically via `Get-AppxPackage OpenAI.Codex`.
+- Activates Codex via `IApplicationActivationManager.ActivateApplication` (the same COM interface the Start Menu uses).
+- Inherits the user's normal environment unchanged.
 - Sets **no** OmniRoute env vars (`OMNIROUTE_*`, `CODEX_BRIDGE_*`, `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`).
 - Starts **no** helper processes.
-- Static audit must show zero OmniRoute references in the script.
+- Before activating Codex, auto-restores any backup at `~/.codex/config.toml.codex-omniroute-backup` and stops a running managed bridge (PID file at `bridge.pid` next to the script). This is suppressible via `-NoAutoRestore` for verification scripts.
 
 ### 2.2 OmniRoute mode
-`Start-Codex-OmniRoute.ps1`. Same official binary, isolated runtime, with bridge:
-- Resolves `app\Codex.exe` from `Get-AppxPackage OpenAI.Codex`.
-- Creates / reuses workspace-local `.codex-omniroute-home/` containing isolated `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `CODEX_HOME`, and Electron `userData` directory (`CODEX_ELECTRON_USER_DATA_PATH`).
-- Seeds **only** `auth.json`, `models_cache.json`, `installation_id` from the user's official Codex home, and only when those files are missing in the isolated home.
-- Writes the isolated `config.toml`:
-  - Inherits the user's official `config.toml` using an **explicit allowlist**. By default the only inherited section family is `[mcp_servers.*]` (and its sub-tables, e.g. `[mcp_servers.<name>.env]`). Everything else is dropped, including:
-    - `[marketplaces.*]` (marketplace sources point at the user's global `~\.cache\codex-runtimes\...` and `~\.codex\.tmp\bundled-marketplaces\...` paths; inheriting them makes the isolated runtime reach back into the user's global cache),
-    - `[plugins.*]` (plugin enable bits reference marketplace IDs that may not exist inside the isolated runtime),
-    - `[projects.*]` (foreign project trust entries are irrelevant to the isolated workspace),
-    - `[windows]` (machine-wide sandbox/shell preferences),
-    - `[model_providers.*]`, `[profiles.*]`, top-level `model`, `model_provider`, `model_reasoning_effort`, `profile` (the OmniRoute managed block owns these).
-  - The allowlist is enforced by `Sanitize-OfficialConfig` in `Start-Codex-OmniRoute.ps1` and re-asserted by `verify-codex-omniroute.ps1`.
-  - Adds the OmniRoute managed block:
-    ```toml
-    model_provider = "omniroute_bridge"
-    model = "gpt-5.4"
-    model_reasoning_effort = "xhigh"
-    profile = "omniroute_managed"
-    experimental_use_freeform_apply_patch = true
+`Start-Codex-OmniRoute.ps1`. Same official binary, same activation path, with a managed bridge:
+- Resolves the Codex package and its `App` AUMID dynamically via `Get-AppxPackage OpenAI.Codex`.
+- Activates Codex via `IApplicationActivationManager.ActivateApplication`, **not** via `Start-Process` against `WindowsApps\...\Codex.exe`. Current Store packages reject direct `CreateProcess` against the package binary with `Access is denied`, and only AppX activation propagates the package identity correctly so that package-internal tooling (`apply_patch.bat`, bundled `codex.exe`, `rg.exe`) is invocable from Codex's child processes.
+- **Does not** override `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`, `PATH`, or any other env var that would change the user's profile or process identity. Codex runs against the user's real `%USERPROFILE%`.
+- Patches the user's real `~/.codex/config.toml` (`<userprofile>\.codex\config.toml`) by appending a clearly-marked managed block between two marker comments:
+  ```
+  # >>> codex-omniroute-managed (auto-generated; do not edit by hand)
+  ...
+  # <<< codex-omniroute-managed
+  ```
+  Before the first write, the original file is copied to `~/.codex/config.toml.codex-omniroute-backup`. If no original existed, an empty backup file is created as a sentinel. The backup is never overwritten by subsequent launches.
+- Re-running the launcher updates the managed block in place. Conflicting **bare top-level** keys (`model_provider`, `model`, `profile`, `model_reasoning_effort`) outside any section header are stripped before the new block is written so that two independent configurations cannot coexist. Section tables outside the managed block (e.g. `[mcp_servers.*]`, `[plugins.*]`, `[projects.*]`, `[windows]`) are preserved verbatim — they belong to the user.
+- The managed block sets:
+  ```toml
+  # >>> codex-omniroute-managed (auto-generated; do not edit by hand)
+  model_provider = "omniroute_bridge"
+  model = "gpt-5.4"
+  model_reasoning_effort = "xhigh"
+  profile = "omniroute_managed"
+  experimental_use_freeform_apply_patch = true   # default ON; -NoFreeformApplyPatch suppresses
 
-    [model_providers.omniroute_bridge]
-    name = "OmniRoute Bridge"
-    base_url = "http://127.0.0.1:<BRIDGE_PORT>/v1"
-    wire_api = "responses"
-    requires_openai_auth = true
-    supports_websockets = false
+  [model_providers.omniroute_bridge]
+  name = "OmniRoute Bridge"
+  base_url = "http://127.0.0.1:<BRIDGE_PORT>/v1"
+  wire_api = "responses"
+  requires_openai_auth = true
+  supports_websockets = false
 
-    [profiles.omniroute_managed]
-    model_provider = "omniroute_bridge"
-    model = "gpt-5.4"
-    model_reasoning_effort = "xhigh"
+  [profiles.omniroute_managed]
+  model_provider = "omniroute_bridge"
+  model = "gpt-5.4"
+  model_reasoning_effort = "xhigh"
 
-    [projects."<absolute workspace path>"]
-    trust_level = "trusted"
-    ```
-    `experimental_use_freeform_apply_patch = true` is written **three times** in the managed block — bare top-level, inside a `[features]` table, and inside `[profiles.omniroute_managed]`. Codex's config schema (per binary scan of the bundled agent CLI) accepts the flag in all three locations, and empirically the per-profile placement is the one that actually activates the in-process tool when an explicit `profile = ...` is selected; the redundancy is harmless. When honored, the flag switches Codex's `apply_patch` to an in-process freeform tool call instead of the `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` shell-out. The shell-out path fails with "Access is denied" under any non-Start-menu launch (Windows AppX containment); AppX activation cannot be used because the broker drops the launcher's isolated env overrides. Default ON; pass `-NoFreeformApplyPatch` to suppress. Requires a GPT-5 family model (the launcher's default `gpt-5.4` qualifies); other models silently fall back to the broken shell-path and the verifier's `freeform-model-compatible` check warns when this happens.
-- The launcher does NOT install a git shim and does NOT export `OMNIROUTE_REAL_GIT_EXE`. Codex sees the user's real `git`, `node`, `powershell.exe`, and other base commands unchanged. The only `PATH` modification the launcher performs is prepending `<isolated>\profile\AppData\Local\OpenAI\Codex\bin\` (where Codex Desktop materializes byte-identical copies of its own bundled CLI on first launch). This makes `codex.exe` PATH-lookups resolve to the user-local copy instead of the AppX-protected WindowsApps copy that triggers Access Denied; it is strictly additive (the user's prior PATH is appended unchanged) and the prepended directory lives entirely inside the isolated runtime home. Pass `-NoLocalCodexBinPath` to skip the prepend.
-- Inherited `[mcp_servers.<name>]` entries with a `command` (i.e. stdio MCP servers, not URL-based ones) are rewritten in the isolated `config.toml` so they run through `tools\mcp-stdio-shield.mjs`. The shield drops any non-JSON line on the child's stdout (taskkill `SUCCESS:` messages, npm warnings, cmd.exe banners) so they cannot corrupt the MCP JSON-RPC transport. Sub-tables like `[mcp_servers.<name>.env]` are left untouched. The shield is on by default; pass `-NoSanitizeMcpStdout` to disable.
-- The launcher mirrors `%LOCALAPPDATA%\Microsoft\WindowsApps` from the user's real `LOCALAPPDATA` into the isolated runtime via a directory junction (`mklink /J`). This keeps Microsoft Store AppX execution aliases resolvable inside the isolated runtime, which is what `apply_patch.bat -> codex.exe --codex-run-as-apply-patch` and similar Codex-internal shell-out chains rely on. Pass `-NoMirrorAppxAliases` to skip the junction.
-- `auth.json`, `models_cache.json`, and `installation_id` seeding can be redirected from the default `%USERPROFILE%\.codex` to any directory via `-AuthSource <dir>`. Use this when the official Codex profile is currently bound to the wrong account; combine with `-Reset` to actually overwrite an existing isolated runtime.
-- Starts `codex-openai-omniroute-bridge.mjs` on `127.0.0.1`, preferred port `20333`, port-scanning forward if busy.
-- `bridge.pid` and `bridge.log` live **in the workspace**, not in the isolated runtime home.
-- Waits for `/healthz` to return `{ok: true}` (timeout: 25s).
-- Launches `Codex.exe` with `UseShellExecute=false` and the isolated env applied.
+  [profiles.omniroute_managed.features]
+  experimental_use_freeform_apply_patch = true
+  # <<< codex-omniroute-managed
+  ```
+  `experimental_use_freeform_apply_patch` is written **twice** (top-level and per-profile) so that whichever placement Codex's config schema honors for the active profile, the in-process freeform tool is enabled. When honored, Codex applies patches in-process instead of shelling out to `apply_patch.bat` → `codex.exe`. The AppX activation path makes the shell-path also work, so this is belt-and-suspenders. The flag requires a GPT-5 family model; the launcher's default `gpt-5.4` qualifies.
 
-`requires_openai_auth = true` is intentional. The official UI must still believe it is operating in an authenticated environment.
+- Starts a local OpenAI-compatible bridge (`codex-openai-omniroute-bridge.mjs`) as a managed `node` subprocess. The bridge:
+  - Binds to `127.0.0.1:<BRIDGE_PORT>` only.
+  - Routes `POST /v1/responses` and `POST /v1/chat/completions` to OmniRoute.
+  - Routes everything else (compact, dictation, models list, account/skills/MCP backend calls) to the official upstream (`https://chatgpt.com/backend-api/codex` by default).
+  - Serves `GET /v1/models` from `<userprofile>\.codex\models_cache.json` so Codex sees its real model list even when OmniRoute itself does not implement a models endpoint.
+  - Persists its PID at `bridge.pid` next to the launcher script.
+  - Logs to `bridge.log` next to the launcher script with `Authorization` headers and API keys redacted.
+
+- `Start-Codex-OmniRoute.ps1 -Restore` is the inverse operation: it stops the managed bridge (if `bridge.pid` points at a live `node` process), restores `~/.codex/config.toml` byte-for-byte from the backup file (or deletes the file when the backup represents "no original"), and removes the backup. After `-Restore`, the on-disk state is indistinguishable from never having run OmniRoute mode.
+
+- `Start-Codex-OmniRoute.ps1 -NoCodex` performs the bridge + config-patch steps but does not activate Codex. Verification scripts use this mode.
 
 ## 3. Bridge contract
 
-### 3.1 Mandatory routes
-| Route | Method | Forward target | Required behavior |
+| Route | Method | Destination | Notes |
 |---|---|---|---|
-| `/healthz` | GET | local | Returns `{ok:true, port, pid, uptime_ms, omniroute:{configured, source, base_url, model_prefix, gpt55_pin_enabled}, official_upstream, official_auth_present, models_cache_present}`. |
-| `/v1/models` | GET | isolated `models_cache.json` | Never call OmniRoute. Return 503 with explanation if cache is missing. |
-| `/v1/responses` | POST | OmniRoute | Decode body, normalize model, set `store=false`, replace inbound auth with OmniRoute key. |
+| `/healthz` | GET | local | Status JSON: port, pid, OmniRoute config presence, official auth presence, models cache presence. |
+| `/v1/models` | GET | `<CODEX_HOME>/models_cache.json` | **Never** fetched from OmniRoute. Returns 503 / documented error when the cache file is missing. |
+| `/v1/responses` | POST | OmniRoute | Model normalized (`gpt-5.4` → `cx/gpt-5.4` by default; prefix configurable). `store=false`. Optional GPT-5.5 connection-ID pin. |
 | `/v1/chat/completions` | POST | OmniRoute | Same normalization. |
-| `/v1/responses/compact` | POST | official upstream | Forward inbound auth; if missing, fall back to isolated `auth.json`. |
-| `/v1/audio/transcriptions` | POST | official upstream | Decode `x-codex-base64: 1` envelope; do not propagate the flag upstream. |
+| `/v1/responses/compact` | POST | official upstream | Uses inbound auth or `auth.json` fallback. |
+| `/v1/audio/transcriptions` | POST | official upstream | Voice Dictation; `x-codex-base64: 1` envelopes decoded locally. |
 | `/transcribe` | POST | official upstream `/audio/transcriptions` | Same base64 handling. |
 | `/v1/images/generations` | GET/POST | official upstream | Optional parity. |
-| *anything else* | * | official upstream | Catchall, with auth fallback. |
+| anything else | * | official upstream | Catchall preserves account/MCP/skills/plugins backend calls. |
 
-### 3.2 Body decoding
-For routes that decode the body (OmniRoute targets, base64-flagged targets):
-1. Read full body.
-2. Apply `content-encoding` reversal in right-to-left order: `gzip`, `deflate` (with `inflateRaw` fallback), `br`, `zstd` (via dynamically imported `@mongodb-js/zstd` / `fzstd` / `zstd-codec`; if no decoder is available, return 415 with a helpful message).
-3. If `x-codex-base64` or `x-codex-base64-multipart` is `1` / `true`, base64-decode the (possibly trimmed) body bytes.
+Hard rules:
 
-### 3.3 Model normalization
-For OmniRoute-bound requests:
-- If the body parses as JSON with a `model` field, prepend `OMNIROUTE_MODEL_PREFIX` (default `cx/`) unless already prefixed; strip a leading `openai/` first.
-- Set `store = false` unconditionally.
-- If GPT-5.5 pinning is enabled (`OMNIROUTE_PIN_55=1` and `OMNIROUTE_55_CONNECTION_ID` set) and the bare model matches one of `gpt-5.5`, `gpt-5.5-thinking`, `gpt-5.5-mini`, inject `connection_id` (and `metadata.connection_id`) into the JSON body.
-- Re-serialize the JSON; update `Content-Type: application/json` and `Content-Length`.
+- The bridge **never** logs `Authorization` headers, API keys, tokens, account IDs, connection IDs, cookies, or `auth.json` contents.
+- The bridge **never** reroutes `/v1/responses/compact`, `/v1/audio/transcriptions`, or `/v1/models` to OmniRoute.
+- The bridge **never** hardcodes connection IDs, account IDs, or API keys; all sensitive values come from env, `omniroute-provider.json` (gitignored), or an OpenCode-style provider config.
+- The bridge decodes gzip / deflate / brotli / (zstd if a decoder is installed) request bodies and `x-codex-base64: 1` multipart envelopes.
 
-### 3.4 Header policy
-- Always strip hop-by-hop headers and the inbound `content-length` / `content-encoding` (we always send uncompressed).
-- For OmniRoute requests: drop `authorization`, `openai-organization`, `openai-project`, `chatgpt-account-id`; inject `Authorization: Bearer <OMNIROUTE_API_KEY>`; merge `provider.headers`.
-- For official upstream requests: forward inbound headers; if `authorization` missing, fall back to `Bearer <auth.json access_token or OPENAI_API_KEY>`; if `chatgpt-account-id` missing, fall back to `auth.json#tokens.account_id`.
-- Always strip `x-codex-base64` / `x-codex-base64-multipart` before forwarding.
+## 4. AppX activation contract
 
-### 3.5 Provider resolution order
-1. `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` from environment.
-2. `omniroute-provider.json` next to the bridge (gitignored).
-3. `~/.config/opencode/auth.json` entry named `cloud_omni`, `miracloud`, or `omniroute`.
+The launchers must activate Codex via the COM interface `IApplicationActivationManager` (CLSID `45BA127D-10A8-46EA-8AB7-56EA9078943C`, IID `2e941141-7f97-4756-ba1d-9decde894a3d`):
 
-If none resolve, OmniRoute-bound routes return `500 omniroute_not_configured`. Official-upstream routes still work.
+```csharp
+ICodexAppxApplicationActivationManager.ActivateApplication(
+    appUserModelId,   // "<PackageFamilyName>!<AppId>"
+    arguments,        // optional activation argument, e.g. workspace path
+    ActivateOptions.NoErrorUI,
+    out processId);
+```
 
-### 3.6 Safety
-- Bind only to `127.0.0.1`.
-- Never log `authorization`, API keys, tokens, account IDs, connection IDs, cookies, or `auth.json` contents.
-- Use graceful shutdown on `SIGINT` / `SIGTERM`.
+This is the same interface the Start Menu uses. It:
 
-## 4. Verification
+- Hands the activation to the AppX broker, which spawns Codex with full package identity.
+- Allows package-internal tools (`apply_patch.bat`, bundled `codex.exe`, `rg.exe`) to be invoked from Codex's child shells without `Access is denied`.
+- Survives Microsoft Store updates: the launcher resolves the package by name and reads the `<Application Id="...">` from the package's `AppxManifest.xml` rather than hardcoding the AUMID.
 
-`verify-codex-omniroute.ps1` must perform, at minimum:
+`Start-Process` against `WindowsApps\OpenAI.Codex_<ver>\app\Codex.exe` must **not** be used: current Store packages reject direct `CreateProcess` against the package binary with `Access is denied`, and even when it succeeds the child loses package identity, breaking `apply_patch`, `rg`, and the bundled `codex.exe`.
 
-Bridge / config invariants:
-1. Run `Start-Codex-OmniRoute.ps1 -NoCodex` and confirm exit 0.
-2. Confirm `bridge.pid` exists and refers to a live process.
-3. Confirm `/healthz` returns `ok=true`.
-4. Confirm the isolated `config.toml` contains the OmniRoute provider block.
-5. Confirm no `<workspace>\.codex\config.toml` was created.
-6. Confirm the global `%USERPROFILE%\.codex\config.toml` (if it exists) does **not** contain `model_provider = "omniroute_bridge"`.
-7. Static-audit `Start-Codex-Official.ps1` for any OmniRoute / `CODEX_BRIDGE_` / `CODEX_ELECTRON_USER_DATA_PATH` / `omniroute_bridge` / `.codex-omniroute-home` references — must find none.
-8. Run `Start-Codex-Official.ps1 -DryRun` and confirm no new `node` helpers were spawned.
-9. POST to `/transcribe` with `x-codex-base64: 1` and verify the bridge does not 4xx-reject locally with `bad_request_encoding`.
-10. Stop the managed bridge and confirm the PID is gone.
+## 5. Core invariants
 
-Native-feature parity invariants:
-11. The isolated `config.toml` has NO `[marketplaces.*]`, `[plugins.*]`, `[windows]`, `[model_providers.<x>]` other than `omniroute_bridge`, or `[profiles.<x>]` other than `omniroute_managed` sections. The only `[projects.*]` entry is the workspace itself.
-12. `Start-Codex-OmniRoute.ps1` source contains no git-shim references (`Ensure-GitShim`, `Resolve-CSharpCompiler`, `OMNIROUTE_REAL_GIT_EXE`, `tools\git-shim`). `tools/git-shim/` does not exist as a directory containing a built shim binary.
-13. The isolated runtime's `skills` directory, when present, resolves under `.codex-omniroute-home`, not under the user's global `~\.codex\skills`.
-14. `bridge.log` does not contain Windows process-management noise (`SUCCESS: The process with PID …`, `Failed to parse MCP message`, `Terminate batch job (Y/N)?`). This is best-effort: absence is necessary but not sufficient for a clean MCP transport.
-15. `tools/mcp_smoke_test.py`, when Python is available, runs cleanly against the isolated config (each MCP server's command is on `PATH` or its `url` is set).
-16. `tools/mcp_probe.mjs`, when Node is available, spawns each stdio MCP server with the same `command`/`args`/env Codex would use, sends a single `initialize` JSON-RPC request, and reports per-server whether a JSON-RPC frame came back within ~6s. A healthy isolated runtime answers `ok=N fail=0` (one entry per stdio server, plus `skip` for any URL-based servers).
-17. Freeform `apply_patch` invariants:
-    - The bundled Codex agent CLI at `<install>\app\resources\codex.exe` contains the string `experimental_use_freeform_apply_patch` (binary scan). This guards against a future Codex update renaming or removing the flag.
-    - The isolated `config.toml` has `experimental_use_freeform_apply_patch = true` somewhere in the file (the managed block by default).
-    - The active managed `model =` matches a GPT-5 family pattern (regex `(?i)(^|/)gpt-5(\.|-|$)`). Non-GPT-5 models silently fall back to the broken shell-path, so this check WARNs when set to anything else.
+Each is enforced by the launchers and asserted by `verify-codex-omniroute.ps1`:
 
-Optional (`-Live`):
-- POST `/v1/responses` to confirm OmniRoute round-trip.
-- POST `/v1/responses/compact` to confirm official upstream round-trip.
+1. The Codex executable launched is the unmodified package resolved from `Get-AppxPackage OpenAI.Codex`; no install path is hardcoded.
+2. Codex is activated via `IApplicationActivationManager.ActivateApplication`, not via `Start-Process` against `WindowsApps\...\Codex.exe`.
+3. Official mode (`Start-Codex-Official.ps1`) inherits the user's environment unchanged, sets no `OMNIROUTE_*` / `CODEX_*` env vars, starts no helper processes, and auto-restores any prior OmniRoute config + stops a running managed bridge before activating Codex.
+4. OmniRoute mode (`Start-Codex-OmniRoute.ps1`) inherits the user's environment unchanged. Its only side-effects are:
+   - A managed block appended to `~/.codex/config.toml`.
+   - A backup at `~/.codex/config.toml.codex-omniroute-backup`.
+   - A managed `node` bridge process tracked by `bridge.pid` next to the launcher.
+5. The managed block is delimited by `# >>> codex-omniroute-managed` / `# <<< codex-omniroute-managed` markers. Re-running the launcher replaces the block in place; conflicting bare top-level keys outside any section are stripped to prevent dual-config drift.
+6. Sections outside the managed block in `~/.codex/config.toml` (`[mcp_servers.*]`, `[plugins.*]`, `[projects.*]`, `[windows]`, etc.) are preserved verbatim.
+7. `Start-Codex-OmniRoute.ps1 -Restore` and `Start-Codex-Official.ps1` both restore the backup byte-for-byte, delete the backup file, and stop the managed bridge.
+8. The bridge binds to `127.0.0.1` only.
+9. The managed `omniroute_bridge` provider pins `requires_openai_auth = true`, `supports_websockets = false`, `wire_api = "responses"`.
+10. Main reasoning goes to OmniRoute; compact + transcription go to the official upstream.
+11. `/v1/models` is served from `~/.codex/models_cache.json`, not OmniRoute.
+12. The bridge decodes gzip / deflate / brotli / (zstd if a decoder is installed) request bodies and `x-codex-base64: 1` multipart envelopes.
+13. Model identifiers like `gpt-5.4` are normalized to `cx/gpt-5.4` (prefix is configurable) before forwarding.
+14. No connection IDs, account IDs, or API keys are hardcoded.
+15. `verify-codex-omniroute.ps1` exercises the above plus a `-Restore` round-trip and leaves the user's config in its original state.
 
-## 5. Things that must remain parameterized / redacted
+## 6. Anti-goals (explicitly NOT in scope)
 
-| Value | Where it lives | Notes |
-|---|---|---|
-| OmniRoute API key | `OMNIROUTE_API_KEY` env, or `api_key` in `omniroute-provider.json`, or OpenCode entry | gitignored |
-| OmniRoute base URL | same | gitignored if private |
-| GPT-5.5 connection ID | `OMNIROUTE_55_CONNECTION_ID` or `gpt55_pin.connection_id` | opt-in only |
-| `auth.json` / `models_cache.json` / `installation_id` | `%USERPROFILE%\.codex\` (source) and `.codex-omniroute-home\codex\` (seeded copy) | gitignored |
-| MCP definitions | inherited from user's official `config.toml` | not parameterized; count is whatever the user has |
-| SSH tunnel host/user/password | nowhere in repo | rotate if leaked |
+The following used to be part of this spec and have been **deliberately removed**:
 
-## 6. Things this repo cannot fully verify off-Windows
+- **Profile isolation** (`HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `TEMP`, `TMP`, `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH` overrides). Caused file dialogs to open in an empty directory, made `git` lose access to `~/.gitconfig` and credential helpers, and required minimal-seed copying of `auth.json` / `models_cache.json` / `installation_id`. The AppX activation path makes isolation unnecessary.
+- **Workspace-local runtime home** (`.codex-omniroute-home/`). Same root cause as above.
+- **AppX payload mirroring** (`robocopy /MIR WindowsApps\...\Codex_<ver> .codex-omniroute-home/appx-payload/`). Was originally added to work around antivirus-induced ACL damage on the original package. Out of scope now that AppX activation is used.
+- **`apply_patch.bat` rewriter daemon** (`tools/apply_patch-rewriter.mjs`). Was polling `<isolated>/tmp/arg0/` every 500ms to rewrite the session-local `apply_patch.bat` so it pointed at a non-AppX `codex.exe`. AppX activation preserves package identity, so the session `apply_patch.bat` invokes the bundled `codex.exe` normally.
+- **`apply_patch` Node wrapper** (`tools/apply_patch-wrapper.mjs`). Out of scope for the same reason.
+- **`PATH`-prepend** to a `%LOCALAPPDATA%\OpenAI\Codex\bin\` copy of the Codex CLI. Out of scope for the same reason.
+- **`Sanitize-OfficialConfig` allowlist** over the user's `config.toml`. We no longer copy the user's config into an isolated profile; the managed block is appended in place and the user's other sections are preserved verbatim.
+- **AppX alias junction mirroring** (`Mirror-AppxAliases`). Out of scope.
+- **Stdio-shielding every MCP server by default.** The shield (`tools/mcp-stdio-shield.mjs`) remains in the repo as an opt-in wrapper for misbehaving servers, but the launcher does not auto-rewrite `[mcp_servers.*]` entries.
 
-- That the Microsoft Store package layout still exposes `app\Codex.exe` after a future Store update.
-- That the official Codex Compact / Dictation endpoints continue to live under `https://chatgpt.com/backend-api/codex` with paths `/responses/compact` and `/audio/transcriptions`. These are the current defaults; override via `CODEX_OFFICIAL_UPSTREAM` if Codex changes them.
-- That OmniRoute's `/responses` shape continues to match the OpenAI Responses API.
+If a future regression in Codex or Windows brings back the original failure modes, anti-goals can be reinstated locally — but they must not be reintroduced silently.
 
-All of these are the right things to re-check when you upgrade Codex.
+## 7. Verification
 
-## 7. Reversal
+`verify-codex-omniroute.ps1` runs `Start-Codex-OmniRoute.ps1 -NoCodex` and asserts the invariants in section 5. It additionally exercises the `-Restore` round-trip and confirms the on-disk state after restore matches the original byte-for-byte.
 
-The setup is fully reversible:
-- Delete `.codex-omniroute-home/` — official Codex is unaffected.
-- Stop using `Start-Codex-OmniRoute.ps1` and run `Start-Codex-Official.ps1` (or launch Codex from the Start Menu).
-- The official `config.toml`, the Store package, and the official profile have never been modified.
+The verifier is the executable definition of "ready to use". A successful run with all rows PASS (or `bridge-models` WARN on a brand-new install, see below) is sufficient evidence that OmniRoute mode is wired up correctly.
+
+`bridge-models` may return WARN on a fresh install because `~/.codex/models_cache.json` is populated by the official Codex Desktop the first time it talks to `chatgpt.com`. Opening the official Codex once resolves this.

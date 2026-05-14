@@ -4,17 +4,25 @@
 
 .DESCRIPTION
     Launches the *unmodified* Microsoft Store Codex app with NO
-    OmniRoute environment overrides, NO bridge, NO isolated runtime home,
-    and NO helper processes.
+    OmniRoute environment overrides, NO bridge, and NO helper processes.
 
-    This is the "control" launcher: when the user wants vanilla Codex
-    behavior with their normal logged-in profile and normal reasoning quota.
+    Before launching, this script automatically reverses any OmniRoute
+    side-effects: if a backup of the user's original config.toml is
+    present (left by Start-Codex-OmniRoute.ps1), it is restored, and any
+    running managed bridge process is stopped. The user therefore gets
+    pristine vanilla Codex even if they had OmniRoute mode active
+    moments before.
 
     Companion: Start-Codex-OmniRoute.ps1 (OmniRoute mode).
 
 .PARAMETER DryRun
     Resolve the Codex package and print what would be launched, but do not
     actually start the app. Useful for verification scripts.
+
+.PARAMETER NoAutoRestore
+    Skip the automatic config restore + bridge shutdown step. Mostly
+    useful for verification scripts that want to inspect the current
+    OmniRoute-managed state without disturbing it.
 
 .NOTES
     - Resolves the Store-installed package dynamically via
@@ -27,7 +35,8 @@
 
 [CmdletBinding()]
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoAutoRestore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +53,7 @@ function Resolve-CodexAppx {
         (Join-Path $pkg.InstallLocation 'app\Codex.exe'),
         (Join-Path $pkg.InstallLocation 'Codex.exe')
     )
+    $exe = $null
     foreach ($c in $candidates) {
         if (Test-Path -LiteralPath $c) { $exe = $c; break }
     }
@@ -114,18 +124,90 @@ public static class CodexOfficialAppxActivator {
 '@
     }
 
-    [uint32]$pid = 0
-    $hr = [CodexOfficialAppxActivator]::Activate($AumId, $Arguments, [ref]$pid)
+    [uint32]$activatedPid = 0
+    $hr = [CodexOfficialAppxActivator]::Activate($AumId, $Arguments, [ref]$activatedPid)
     if ($hr -ne 0) {
         throw ("AppX activation failed for {0} (HRESULT 0x{1:X8})." -f $AumId, $hr)
     }
-    return $pid
+    return $activatedPid
+}
+
+# ----------------------------------------------------------------------------
+# Auto-restore helpers (reverse OmniRoute side-effects on ~/.codex/config.toml)
+# ----------------------------------------------------------------------------
+
+$ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
+$ManagedBlockEnd   = '# <<< codex-omniroute-managed'
+
+function Remove-OmniRouteManagedBlock {
+    param([string]$Content)
+    if ($null -eq $Content -or $Content.Length -eq 0) { return $Content }
+    $pattern = '(?ms)^[\t ]*' + [regex]::Escape($ManagedBlockBegin) + '[\s\S]*?' + [regex]::Escape($ManagedBlockEnd) + '[\t ]*\r?\n?'
+    $stripped = [regex]::Replace($Content, $pattern, '')
+    return [regex]::Replace($stripped, '(\r?\n){3,}', "`r`n`r`n")
+}
+
+function Invoke-AutoRestore {
+    $codexHome  = Join-Path $env:USERPROFILE '.codex'
+    $configPath = Join-Path $codexHome 'config.toml'
+    $backupPath = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
+
+    # Stop any OmniRoute-managed bridge. The pid file lives next to this
+    # script (same convention used by Start-Codex-OmniRoute.ps1).
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+    if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+    $bridgePid = Join-Path $scriptDir 'bridge.pid'
+    if (Test-Path -LiteralPath $bridgePid) {
+        try {
+            $pidText = (Get-Content -LiteralPath $bridgePid -Raw).Trim()
+            if ($pidText -match '^\d+$') {
+                $existing = Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue
+                if ($existing -and $existing.ProcessName -match '^node') {
+                    Stop-Process -Id ([int]$pidText) -Force -ErrorAction SilentlyContinue
+                    Write-Host "[official] stopped OmniRoute bridge (pid=$pidText)"
+                }
+            }
+        } catch { }
+        Remove-Item -LiteralPath $bridgePid -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path -LiteralPath $backupPath) {
+        $backup = Get-Content -LiteralPath $backupPath -Raw
+        if ($null -eq $backup) { $backup = '' }
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        if ($backup.Length -eq 0) {
+            if (Test-Path -LiteralPath $configPath) {
+                Remove-Item -LiteralPath $configPath -Force
+                Write-Host "[official] removed OmniRoute-managed config $configPath (no original existed)"
+            }
+        } else {
+            [System.IO.File]::WriteAllText($configPath, $backup, $utf8NoBom)
+            Write-Host "[official] restored original config from $backupPath"
+        }
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    # No backup -- strip any orphan managed block in place.
+    if (Test-Path -LiteralPath $configPath) {
+        $existing = Get-Content -LiteralPath $configPath -Raw
+        if ($existing -and $existing.Contains($ManagedBlockBegin)) {
+            $stripped = Remove-OmniRouteManagedBlock -Content $existing
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($configPath, $stripped, $utf8NoBom)
+            Write-Host "[official] stripped OmniRoute managed block from $configPath (no backup available)"
+        }
+    }
+}
+
+if (-not $NoAutoRestore) {
+    Invoke-AutoRestore
 }
 
 $appx = Resolve-CodexAppx
 Write-Host "[official] Codex AppUserModelID: $($appx.AumId)"
 Write-Host "[official] Codex package executable: $($appx.ExePath)"
-Write-Host "[official] Mode: clean baseline (no OmniRoute env, no bridge, no isolated runtime home)."
+Write-Host "[official] Mode: clean baseline (no OmniRoute env, no bridge)."
 
 if ($DryRun) {
     Write-Host "[official] DryRun: not launching."
@@ -144,9 +226,9 @@ if ($DryRun) {
 # Launch through the AppX broker, matching Start Menu semantics. Current
 # Store packages reject direct CreateProcess against WindowsApps\...\Codex.exe
 # with "Access is denied".
-$pid = Start-CodexViaAppx -AumId $appx.AumId
-if ($pid -gt 0) {
-    Write-Host "[official] Launched via AppX activation (pid=$pid)."
+$activatedPid = Start-CodexViaAppx -AumId $appx.AumId
+if ($activatedPid -gt 0) {
+    Write-Host "[official] Launched via AppX activation (pid=$activatedPid)."
 } else {
     Write-Host "[official] AppX activation succeeded."
 }
