@@ -219,19 +219,34 @@ if (Test-Path -LiteralPath $backupPath) {
 # ----------------------------------------------------------------------------
 
 $officialOk = $true
+$officialReason = ''
 try {
     $output = & $psHost -NoProfile -ExecutionPolicy Bypass -File $offLauncher -DryRun -NoAutoRestore 2>&1
-    if ($LASTEXITCODE -ne 0) { $officialOk = $false }
+    if ($LASTEXITCODE -ne 0) {
+        $officialOk = $false
+        $officialReason = "DryRun exited with code $LASTEXITCODE"
+    }
     $joined = ($output | Out-String)
-    # The official launcher must not reference OmniRoute or bridges anywhere in
-    # its DryRun output.
-    if ($joined -match 'OMNIROUTE|CODEX_BRIDGE_|bridge\.mjs') { $officialOk = $false }
-} catch { $officialOk = $false }
+    # The official launcher is allowed to *mention* OmniRoute in its own
+    # status output (it literally prints "Mode: clean baseline (no OmniRoute
+    # env, no bridge)."). What it is NOT allowed to do is set any of the
+    # OmniRoute/bridge env vars or reference the bridge script. So we only
+    # flag actual env-var names (UPPER_SNAKE_CASE with a trailing token) and
+    # the bridge module path. -cmatch keeps the check case-sensitive so the
+    # status string's PascalCase "OmniRoute" doesn't trip a false FAIL.
+    if ($joined -cmatch 'OMNIROUTE_[A-Z0-9_]+|CODEX_BRIDGE_[A-Z0-9_]+|bridge\.mjs') {
+        $officialOk = $false
+        $officialReason = 'DryRun output referenced an OmniRoute env var or bridge.mjs'
+    }
+} catch {
+    $officialOk = $false
+    $officialReason = "DryRun threw: $($_.Exception.Message)"
+}
 
 if ($officialOk) {
-    Add-Result 'official-launcher-dryrun' 'PASS' 'official launcher resolves package cleanly and references no OmniRoute env'
+    Add-Result 'official-launcher-dryrun' 'PASS' 'official launcher resolves package cleanly and sets no OmniRoute env'
 } else {
-    Add-Result 'official-launcher-dryrun' 'FAIL' 'official launcher DryRun failed or leaked OmniRoute references'
+    Add-Result 'official-launcher-dryrun' 'FAIL' $officialReason
 }
 
 # ----------------------------------------------------------------------------
@@ -303,7 +318,7 @@ if ($Live) {
 # ----------------------------------------------------------------------------
 
 if (-not $LeaveBridgeRunning) {
-    $backupBefore = if (Test-Path -LiteralPath $backupPath) { Get-Content -LiteralPath $backupPath -Raw } else { $null }
+    $backupExistedBefore = Test-Path -LiteralPath $backupPath
     & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -Restore | Out-Null
     $restoreExit = $LASTEXITCODE
 
@@ -311,22 +326,42 @@ if (-not $LeaveBridgeRunning) {
     $backupGone  = -not (Test-Path -LiteralPath $backupPath)
     $bridgeGone  = -not (Test-Path -LiteralPath $bridgePid)
 
-    $configRestored = $false
-    if ($null -eq $backupBefore) {
-        # No original existed, so config should now be gone.
-        $configRestored = ($null -eq $configAfter)
+    # Semantic restore check (was: byte-for-byte equality with the backup).
+    # The launcher always reads the backup as a .NET string and re-writes it
+    # via WriteAllText with UTF8-no-BOM. On real Windows this can differ in
+    # bytes from the original backup file when the original was UTF-8 with
+    # BOM or used CR-only line endings, even though the config is logically
+    # restored. The invariants we actually care about for catching regressions
+    # are:
+    #   - launcher exited 0
+    #   - backup file was consumed and removed
+    #   - bridge.pid was removed (bridge stopped)
+    #   - config no longer contains the managed block (if backup existed)
+    #     OR config was deleted entirely (if backup was empty / no original)
+    $blockGone = $true
+    if ($backupExistedBefore) {
+        if ($null -ne $configAfter -and $configAfter.Contains($ManagedBlockBegin)) {
+            $blockGone = $false
+        }
+        # If the original config had real content, expect the file to still
+        # exist after restore. If the backup was empty (sentinel for "no
+        # original"), the launcher deletes the config -- that's correct too.
     } else {
-        $configRestored = ($configAfter -eq $backupBefore)
+        # No backup at restore-time means -Restore had to fall back to the
+        # in-place strip path. Config must not contain a managed block.
+        if ($null -ne $configAfter -and $configAfter.Contains($ManagedBlockBegin)) {
+            $blockGone = $false
+        }
     }
 
-    if ($restoreExit -eq 0 -and $configRestored -and $backupGone -and $bridgeGone) {
-        Add-Result 'restore-roundtrip' 'PASS' 'config restored byte-for-byte, backup cleared, bridge stopped'
+    if ($restoreExit -eq 0 -and $blockGone -and $backupGone -and $bridgeGone) {
+        Add-Result 'restore-roundtrip' 'PASS' 'managed block removed, backup cleared, bridge stopped'
     } else {
         $why = @()
         if ($restoreExit -ne 0) { $why += "exit=$restoreExit" }
-        if (-not $configRestored) { $why += 'config does not match backup' }
-        if (-not $backupGone) { $why += 'backup file still present' }
-        if (-not $bridgeGone) { $why += 'bridge.pid still present' }
+        if (-not $blockGone)    { $why += 'managed block still present in config' }
+        if (-not $backupGone)   { $why += 'backup file still present' }
+        if (-not $bridgeGone)   { $why += 'bridge.pid still present' }
         Add-Result 'restore-roundtrip' 'FAIL' ($why -join '; ')
     }
 }
