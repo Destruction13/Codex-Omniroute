@@ -58,7 +58,19 @@ const OFFICIAL_UPSTREAM = stripTrailingSlash(
 );
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
+// When the OmniRoute launcher rewrites $CODEX_HOME/auth.json into a managed
+// API-key sentinel (so Codex Desktop is forced into API-key auth mode and
+// stops bypassing the bridge), the user's *real* OAuth/ChatGPT session
+// tokens live in the backup file. CODEX_OFFICIAL_AUTH_PATH lets the
+// launcher tell the bridge to read auth from that backup instead of the
+// managed file, so compact and dictation passthroughs still succeed
+// against the official upstream. Falls back to the default $CODEX_HOME
+// path when not set (standalone bridge / vanilla Codex).
+const CODEX_AUTH_PATH =
+  typeof process.env.CODEX_OFFICIAL_AUTH_PATH === "string" &&
+  process.env.CODEX_OFFICIAL_AUTH_PATH.length > 0
+    ? process.env.CODEX_OFFICIAL_AUTH_PATH
+    : path.join(CODEX_HOME, "auth.json");
 const CODEX_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
 
 const OMNIROUTE_BASE_URL_ENV = stripTrailingSlash(process.env.OMNIROUTE_BASE_URL || "");
@@ -72,6 +84,14 @@ const PROVIDER_JSON_PATH = path.resolve(
 );
 const OPENCODE_AUTH_PATH = path.join(os.homedir(), ".config", "opencode", "auth.json");
 const OPENCODE_PROVIDER_NAMES = ["cloud_omni", "miracloud", "omniroute"];
+
+// Sentinel Bearer the OmniRoute launcher writes into the managed
+// $CODEX_HOME/auth.json. It is never a valid credential against any real
+// upstream; it exists only to flip Codex Desktop into API-key auth mode so
+// the bridge actually sees /v1/responses. The bridge strips it on the
+// official-passthrough path and uses the real OAuth tokens loaded from the
+// backup file instead (see CODEX_OFFICIAL_AUTH_PATH above).
+const MANAGED_AUTH_SENTINEL = "sk-omniroute-managed";
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEX_BRIDGE_REQUEST_TIMEOUT_MS || "300000", 10);
 const LOG_LEVEL = (process.env.CODEX_BRIDGE_LOG_LEVEL || "info").toLowerCase();
@@ -440,6 +460,15 @@ function buildForwardHeaders(inboundHeaders, mode, provider, officialAuth) {
     for (const [k, v] of Object.entries(provider.headers || {})) out[k] = String(v);
     out["x-omniroute-client"] = out["x-omniroute-client"] || "codex-omniroute-bridge";
   } else if (mode === "official") {
+    // If Codex Desktop is in OmniRoute-managed API-key mode it is sending
+    // the sentinel Bearer (sk-omniroute-managed) on every request,
+    // including compact / dictation. That value is not valid against
+    // chatgpt.com — strip it and substitute the real OAuth bearer loaded
+    // from the backup auth.json (see CODEX_OFFICIAL_AUTH_PATH).
+    const inboundAuth = out["authorization"];
+    if (typeof inboundAuth === "string" && inboundAuth.includes(MANAGED_AUTH_SENTINEL)) {
+      delete out["authorization"];
+    }
     if (!out["authorization"] && officialAuth?.bearer) {
       out["authorization"] = `Bearer ${officialAuth.bearer}`;
     }
@@ -510,6 +539,27 @@ function forwardOutbound({ target, method, headers, bodyBuf, clientRes, isStream
 async function handleHealth(req, res) {
   const provider = await resolveProvider();
   const auth = await loadOfficialAuth();
+
+  // Inspect the *live* $CODEX_HOME/auth.json (not the override at
+  // CODEX_AUTH_PATH) so the verifier can confirm Codex Desktop is being
+  // pointed at the API-key sentinel and is NOT silently falling back to a
+  // ChatGPT OAuth session.
+  const liveAuthPath = path.join(CODEX_HOME, "auth.json");
+  const liveAuth = await tryReadJson(liveAuthPath);
+  const liveHasOAuthTokens = Boolean(
+    liveAuth &&
+      typeof liveAuth === "object" &&
+      liveAuth.tokens &&
+      typeof liveAuth.tokens === "object" &&
+      typeof liveAuth.tokens.access_token === "string" &&
+      liveAuth.tokens.access_token.length > 0,
+  );
+  const liveHasSentinel = Boolean(
+    liveAuth &&
+      typeof liveAuth === "object" &&
+      liveAuth.OPENAI_API_KEY === MANAGED_AUTH_SENTINEL,
+  );
+
   res.statusCode = 200;
   res.setHeader("content-type", "application/json");
   res.end(
@@ -530,7 +580,19 @@ async function handleHealth(req, res) {
         model_prefix: provider?.model_prefix || null,
         gpt55_pin_enabled: Boolean(provider?.gpt55_pin?.enabled && provider?.gpt55_pin?.connection_id),
       },
+      official_auth_path: CODEX_AUTH_PATH,
       official_auth_present: Boolean(extractOfficialBearer(auth)),
+      managed_auth: {
+        // Codex Desktop reads $CODEX_HOME/auth.json. These three flags let
+        // the verifier prove main-chat reasoning will hit the bridge:
+        //   - sentinel_present=true && oauth_tokens_present=false means
+        //     Desktop is in API-key auth mode and CANNOT bypass us via a
+        //     ChatGPT OAuth session.
+        //   - oauth_tokens_present=true is the regression we are fixing.
+        live_path: liveAuthPath,
+        sentinel_present: liveHasSentinel,
+        oauth_tokens_present: liveHasOAuthTokens,
+      },
       models_cache_present: await pathExists(CODEX_MODELS_PATH),
     }),
   );

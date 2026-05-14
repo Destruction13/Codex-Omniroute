@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Codex OmniRoute is intentionally a thin mode switch on top of the
-    unmodified Microsoft Store Codex app. The architecture has two moving
-    parts:
+    unmodified Microsoft Store Codex app. The architecture has three
+    moving parts:
 
       1. A local Node bridge (codex-openai-omniroute-bridge.mjs) that:
            - reroutes /v1/responses and /v1/chat/completions to OmniRoute;
@@ -21,13 +21,31 @@
                  requires_openai_auth = true
                  supports_websockets  = false
 
-    The original config.toml is backed up to
-    %USERPROFILE%\.codex\config.toml.codex-omniroute-backup the first time
+      3. A managed %USERPROFILE%\.codex\auth.json that flips Codex Desktop
+         into API-key auth mode:
+             { "OPENAI_API_KEY": "sk-omniroute-managed",
+               "tokens": null, "last_refresh": null }
+         This is the actual fix for the bridge-bypass regression. With a
+         real ChatGPT OAuth auth.json in place Codex Desktop talks to
+         chatgpt.com directly for main reasoning and never hits the bridge
+         no matter what config.toml says. Writing the API-key sentinel
+         forces Desktop down the requires_openai_auth code path, which IS
+         the bridge. The sentinel value itself is never a valid credential
+         against any real upstream; the bridge strips it on the
+         official-passthrough route and substitutes the user's real
+         OAuth tokens loaded from the backup file (see
+         CODEX_OFFICIAL_AUTH_PATH in the bridge).
+
+    The original config.toml and auth.json are backed up to
+    %USERPROFILE%\.codex\config.toml.codex-omniroute-backup and
+    %USERPROFILE%\.codex\auth.json.codex-omniroute-backup the first time
     the launcher runs. The managed block is delimited by marker comments
     (# >>> codex-omniroute-managed ... # <<< codex-omniroute-managed) so it
     can be detected, re-written on the next launch (port may differ), and
     fully removed by `Start-Codex-OmniRoute.ps1 -Restore` or by
-    `Start-Codex-Official.ps1`.
+    `Start-Codex-Official.ps1`. The auth.json side mirrors the same
+    backup / restore contract: backed up on first launch, restored byte-
+    for-byte on -Restore, deleted if no original existed.
 
     Codex.exe itself is launched through the AppX activation broker
     (IApplicationActivationManager), exactly the way Start-Menu and
@@ -52,7 +70,9 @@
 
 .PARAMETER Restore
     Remove the managed block from ~/.codex/config.toml (restoring the
-    backed-up original where possible) and stop the managed bridge.
+    backed-up original where possible), restore the user's original
+    ~/.codex/auth.json from its backup (or delete the managed sentinel
+    file when no original existed), and stop the managed bridge.
     Equivalent to switching back to vanilla Codex. Does not launch Codex.
 
 .PARAMETER DryRun
@@ -82,9 +102,13 @@
 
 .NOTES
     - Never modifies the Microsoft Store Codex package.
-    - Always backs up ~/.codex/config.toml before the first modification.
+    - Always backs up ~/.codex/config.toml AND ~/.codex/auth.json before
+      the first modification.
     - The managed block carries the bridge port number; restoring is
       always reversible.
+    - The managed auth.json is an API-key sentinel; it does not embed any
+      real credential and never reaches a real upstream — the bridge
+      strips it on the official passthrough path.
 #>
 
 [CmdletBinding()]
@@ -107,6 +131,14 @@ Set-StrictMode -Version Latest
 
 $ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
 $ManagedBlockEnd   = '# <<< codex-omniroute-managed'
+
+# Sentinel API key written into the managed ~/.codex/auth.json. Its only
+# job is to flip Codex Desktop into API-key auth mode so it actually goes
+# through the bridge for main reasoning (instead of bypassing it via the
+# ChatGPT OAuth session in the user's real auth.json). The bridge strips
+# this value on the official-passthrough path; see MANAGED_AUTH_SENTINEL
+# in codex-openai-omniroute-bridge.mjs. Keep the value in sync.
+$ManagedAuthSentinelApiKey = 'sk-omniroute-managed'
 
 # ----------------------------------------------------------------------------
 # Host platform detection
@@ -302,7 +334,17 @@ function Stop-ManagedBridge {
 # ----------------------------------------------------------------------------
 
 function Get-OfficialCodexHome {
-    return (Join-Path $env:USERPROFILE '.codex')
+    # USERPROFILE is Windows-only. On non-Windows hosts (CI / verifier
+    # smoke), fall back to $HOME so the launcher and the bridge agree on
+    # which directory holds config.toml / auth.json. Codex Desktop itself
+    # only ever runs on Windows.
+    if ($env:USERPROFILE) {
+        return (Join-Path $env:USERPROFILE '.codex')
+    }
+    if ($env:HOME) {
+        return (Join-Path $env:HOME '.codex')
+    }
+    throw "Cannot resolve Codex home directory: neither USERPROFILE nor HOME is set."
 }
 
 function Ensure-ConfigBackup {
@@ -526,6 +568,167 @@ function Restore-OriginalConfig {
 }
 
 # ----------------------------------------------------------------------------
+# Codex auth.json: backup + managed-sentinel write + restore
+#
+# This is the actual fix for the bridge-bypass regression. Codex Desktop
+# decides between OAuth/ChatGPT-session mode and API-key mode by looking
+# at the contents of ~/.codex/auth.json:
+#
+#     { "tokens": { "access_token": "..." } }   -> OAuth/ChatGPT mode,
+#                                                  Desktop calls chatgpt.com
+#                                                  directly and bypasses our
+#                                                  bridge for /v1/responses
+#                                                  no matter what
+#                                                  config.toml says.
+#
+#     { "OPENAI_API_KEY": "..." }               -> API-key mode, Desktop
+#                                                  honours config.toml's
+#                                                  model_provider with
+#                                                  requires_openai_auth=true,
+#                                                  which IS the bridge.
+#
+# So in OmniRoute mode we temporarily replace ~/.codex/auth.json with the
+# API-key sentinel, while keeping the user's real auth.json byte-for-byte
+# in the backup so:
+#   (a) -Restore (and Start-Codex-Official.ps1) can put it back exactly,
+#   (b) the bridge can still load the real OAuth tokens from the backup
+#       for compact / dictation passthrough via CODEX_OFFICIAL_AUTH_PATH.
+# ----------------------------------------------------------------------------
+
+function Get-ManagedAuthObject {
+    # Returns an [ordered] hashtable so the resulting JSON has a stable key
+    # order (helps the verifier and human readers spot the sentinel
+    # without parsing).
+    return [ordered]@{
+        '_codex_omniroute' = [ordered]@{
+            'managed' = $true
+            'note'    = 'This auth.json was written by Start-Codex-OmniRoute.ps1 to force Codex Desktop into API-key auth mode so main reasoning routes through the OmniRoute bridge. Original file (if any) is at auth.json.codex-omniroute-backup. Restored by -Restore or by Start-Codex-Official.ps1.'
+            'sentinel' = $ManagedAuthSentinelApiKey
+        }
+        'OPENAI_API_KEY'   = $ManagedAuthSentinelApiKey
+        'tokens'           = $null
+        'last_refresh'     = $null
+    }
+}
+
+function Test-IsManagedAuthContent {
+    param([string]$Content)
+    if ([string]::IsNullOrWhiteSpace($Content)) { return $false }
+    try {
+        $obj = $Content | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    if (-not $obj) { return $false }
+    # Two signals, either is enough to recognize our own write:
+    #   (a) the _codex_omniroute marker block,
+    #   (b) OPENAI_API_KEY exactly equal to the sentinel.
+    $hasMarker = $false
+    try {
+        if ($obj.PSObject.Properties.Name -contains '_codex_omniroute') {
+            $marker = $obj.'_codex_omniroute'
+            if ($marker -and $marker.managed) { $hasMarker = $true }
+        }
+    } catch { }
+    $hasSentinel = $false
+    try {
+        if ($obj.PSObject.Properties.Name -contains 'OPENAI_API_KEY') {
+            if ([string]$obj.OPENAI_API_KEY -eq $ManagedAuthSentinelApiKey) {
+                $hasSentinel = $true
+            }
+        }
+    } catch { }
+    return ($hasMarker -or $hasSentinel)
+}
+
+function Ensure-AuthBackup {
+    param(
+        [Parameter(Mandatory = $true)][string]$AuthPath,
+        [Parameter(Mandatory = $true)][string]$BackupPath
+    )
+
+    # If a backup already exists, never overwrite it -- even if the live
+    # auth.json is currently our managed sentinel. Otherwise we would
+    # corrupt the only copy of the user's real OAuth tokens.
+    if (Test-Path -LiteralPath $BackupPath) { return }
+
+    if (Test-Path -LiteralPath $AuthPath) {
+        $existing = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $existing -and (Test-IsManagedAuthContent -Content $existing)) {
+            # Live file is already our managed sentinel and no backup
+            # exists. That means a previous launcher run wrote the
+            # sentinel and the user's original is unrecoverable. Record
+            # the fact as an empty backup so -Restore knows to DELETE
+            # the managed file rather than write the sentinel back.
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($BackupPath, '', $utf8NoBom)
+            Write-Host "[omniroute] auth.json is already managed and no backup exists; recorded empty backup at $BackupPath"
+            return
+        }
+        Copy-Item -LiteralPath $AuthPath -Destination $BackupPath -Force
+        Write-Host "[omniroute] backed up original auth.json: $BackupPath"
+    } else {
+        # No existing auth.json -- record that as an empty backup so
+        # -Restore deletes our managed sentinel file.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($BackupPath, '', $utf8NoBom)
+        Write-Host "[omniroute] no pre-existing auth.json; empty backup recorded: $BackupPath"
+    }
+}
+
+function Write-ManagedAuth {
+    param([Parameter(Mandatory = $true)][string]$AuthPath)
+
+    $authDir = Split-Path -Parent $AuthPath
+    if (-not (Test-Path -LiteralPath $authDir)) {
+        New-Item -ItemType Directory -Path $authDir -Force | Out-Null
+    }
+    $managed = Get-ManagedAuthObject
+    # Depth 10 is plenty for our tiny object; ConvertTo-Json defaults to 2
+    # and would silently truncate the marker.
+    $json = $managed | ConvertTo-Json -Depth 10
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($AuthPath, $json, $utf8NoBom)
+}
+
+function Restore-OriginalAuth {
+    param(
+        [Parameter(Mandatory = $true)][string]$AuthPath,
+        [Parameter(Mandatory = $true)][string]$BackupPath
+    )
+
+    if (Test-Path -LiteralPath $BackupPath) {
+        $backup = Get-Content -LiteralPath $BackupPath -Raw
+        if ($null -eq $backup) { $backup = '' }
+        if ($backup.Length -eq 0) {
+            # Empty backup means there was no original auth.json (or it
+            # was already managed when we first saw it) -- delete the
+            # managed sentinel file.
+            if (Test-Path -LiteralPath $AuthPath) {
+                Remove-Item -LiteralPath $AuthPath -Force
+                Write-Host "[omniroute] restore: removed managed auth.json $AuthPath (no original existed)"
+            }
+        } else {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText($AuthPath, $backup, $utf8NoBom)
+            Write-Host "[omniroute] restore: original auth.json restored from $BackupPath"
+        }
+        Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    # No backup -- best-effort: if the live file is our managed sentinel,
+    # remove it; otherwise leave the user's file untouched.
+    if (Test-Path -LiteralPath $AuthPath) {
+        $existing = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction SilentlyContinue
+        if ($null -ne $existing -and (Test-IsManagedAuthContent -Content $existing)) {
+            Remove-Item -LiteralPath $AuthPath -Force
+            Write-Host "[omniroute] restore: removed orphan managed auth.json $AuthPath (no backup available)"
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------
 
@@ -538,16 +741,19 @@ if (-not (Test-Path -LiteralPath $bridgeScript)) {
 $bridgePid = Join-Path $scriptRoot 'bridge.pid'
 $bridgeLog = Join-Path $scriptRoot 'bridge.log'
 
-$codexHome   = Get-OfficialCodexHome
-$configPath  = Join-Path $codexHome 'config.toml'
-$backupPath  = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
+$codexHome       = Get-OfficialCodexHome
+$configPath      = Join-Path $codexHome 'config.toml'
+$backupPath      = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
+$authPath        = Join-Path $codexHome 'auth.json'
+$authBackupPath  = Join-Path $codexHome 'auth.json.codex-omniroute-backup'
 
 # ---- Restore mode ---------------------------------------------------------
 
 if ($Restore) {
     Stop-ManagedBridge -PidPath $bridgePid
     Restore-OriginalConfig -ConfigPath $configPath -BackupPath $backupPath
-    Write-Host "[omniroute] restore complete. Codex now uses your original config."
+    Restore-OriginalAuth   -AuthPath   $authPath   -BackupPath $authBackupPath
+    Write-Host "[omniroute] restore complete. Codex now uses your original config + auth."
     exit 0
 }
 
@@ -562,6 +768,7 @@ Write-Host "[omniroute] node:        $nodeExe"
 Write-Host "[omniroute] bridge port: $port"
 Write-Host "[omniroute] codex home:  $codexHome"
 Write-Host "[omniroute] config file: $configPath"
+Write-Host "[omniroute] auth  file: $authPath"
 
 # Warn if Codex is already running -- the AppX broker will activate the
 # existing instance, which won't re-read config.toml.
@@ -571,26 +778,32 @@ if ($existingCodex) {
 }
 
 if ($DryRun) {
-    Write-Host "[omniroute] DryRun -- not modifying config, not starting bridge, not launching Codex."
+    Write-Host "[omniroute] DryRun -- not modifying config/auth, not starting bridge, not launching Codex."
     [pscustomobject]@{
-        Mode             = 'omniroute'
-        AumId            = $appx.AumId
-        BridgePort       = $port
-        BridgeScript     = $bridgeScript
-        ConfigPath       = $configPath
-        BackupPath       = $backupPath
+        Mode               = 'omniroute'
+        AumId              = $appx.AumId
+        BridgePort         = $port
+        BridgeScript       = $bridgeScript
+        ConfigPath         = $configPath
+        BackupPath         = $backupPath
+        AuthPath           = $authPath
+        AuthBackupPath     = $authBackupPath
         FreeformApplyPatch = (-not $NoFreeformApplyPatch)
-        OpenProject      = $OpenProject
-        DryRun           = $true
+        OpenProject        = $OpenProject
+        DryRun             = $true
     } | Format-List
     exit 0
 }
 
-# ---- Backup + write managed block -----------------------------------------
+# ---- Backup + write managed block + write managed auth.json --------------
 
 Ensure-ConfigBackup -ConfigPath $configPath -BackupPath $backupPath
 Write-ManagedConfig -ConfigPath $configPath -Port $port -IncludeFreeform:(-not $NoFreeformApplyPatch)
 Write-Host "[omniroute] wrote managed block into $configPath"
+
+Ensure-AuthBackup -AuthPath $authPath -BackupPath $authBackupPath
+Write-ManagedAuth -AuthPath $authPath
+Write-Host "[omniroute] wrote managed API-key sentinel into $authPath (Desktop will use API-key auth)"
 
 # ---- Start (or restart) the bridge ----------------------------------------
 
@@ -616,6 +829,14 @@ $bridgeEnv = @{
 }
 if ($resolvedProvider -and (Test-Path -LiteralPath $resolvedProvider)) {
     $bridgeEnv['OMNIROUTE_PROVIDER_JSON'] = $resolvedProvider
+}
+# Point the bridge at the backup so compact / dictation can still use the
+# user's real OAuth tokens, even though the live auth.json now holds the
+# managed sentinel. If the backup is empty (sentinel for "no original"),
+# the bridge gracefully degrades the auth-fallback path (same as today
+# when ~/.codex/auth.json is missing).
+if (Test-Path -LiteralPath $authBackupPath) {
+    $bridgeEnv['CODEX_OFFICIAL_AUTH_PATH'] = $authBackupPath
 }
 
 $bridgePrev = @{}
