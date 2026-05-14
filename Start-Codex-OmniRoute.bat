@@ -1,7 +1,13 @@
 @echo off
-REM Convenience launcher: official Codex binary + isolated runtime + OmniRoute bridge.
+REM Convenience launcher: official Codex binary + managed config block + OmniRoute bridge.
+REM Prefers PowerShell 7+ (pwsh) when installed; falls back to built-in Windows PowerShell.
 pushd "%~dp0"
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\Start-Codex-OmniRoute.ps1" %*
+where /q pwsh.exe
+if %ERRORLEVEL%==0 (
+    pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\Start-Codex-OmniRoute.ps1" %*
+) else (
+    powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File ".\Start-Codex-OmniRoute.ps1" %*
+)
 set RC=%ERRORLEVEL%
 popd
 exit /b %RC%

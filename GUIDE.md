@@ -5,7 +5,7 @@ Day-to-day usage notes, debugging recipes, and answers to "what if".
 ## First-time setup checklist
 
 - [ ] Microsoft Store Codex app installed, signed in once, opened at least once (so `%USERPROFILE%\.codex\auth.json` and `models_cache.json` exist).
-- [ ] PowerShell 7+ available (`pwsh.exe`).
+- [ ] PowerShell 7+ available (`pwsh.exe`) is **recommended but not required**. Windows PowerShell 5.1 (`powershell.exe`) also works — `Setup.bat` offers to install PS 7+ via `winget` and the `.bat` launchers auto-prefer `pwsh` when present.
 - [ ] Node.js 18.18+ on `PATH` (`node --version`).
 - [ ] OmniRoute reachable (locally, via SSH tunnel, or remote). One of:
       - `$env:OMNIROUTE_BASE_URL` + `$env:OMNIROUTE_API_KEY`
@@ -19,7 +19,7 @@ Day-to-day usage notes, debugging recipes, and answers to "what if".
 .\Start-Codex-OmniRoute.ps1
 ```
 
-Then use Codex normally. The official UI is what's running.
+Then use Codex normally. The official UI is what's running — same window, same icon, same Skills/Voice/MCP. The only difference is that reasoning calls leave through your OmniRoute key.
 
 To go back to vanilla Codex (your normal account, full quota in play):
 
@@ -27,7 +27,26 @@ To go back to vanilla Codex (your normal account, full quota in play):
 .\Start-Codex-Official.ps1
 ```
 
-Both launchers can coexist; OmniRoute mode is contained inside `.codex-omniroute-home/` and never touches your global Codex profile.
+The official launcher automatically restores your original `config.toml` from the backup and stops the managed bridge before activating Codex, so the switch is seamless. You can also restore explicitly:
+
+```powershell
+.\Start-Codex-OmniRoute.ps1 -Restore
+```
+
+That stops the bridge and removes the OmniRoute managed block, leaving your `~/.codex/config.toml` exactly as it was.
+
+## How OmniRoute mode affects your machine
+
+OmniRoute mode is intentionally lightweight. Per launch it touches:
+
+| Path | What happens |
+|---|---|
+| `~/.codex/config.toml` | A clearly-marked managed block is appended (or replaced if one is already there) between `# >>> codex-omniroute-managed` and `# <<< codex-omniroute-managed` markers. Conflicting bare top-level keys (`model_provider`, `model`, `profile`, `model_reasoning_effort`) outside any section are stripped. Your `[mcp_servers.*]`, `[plugins.*]`, etc. are untouched. |
+| `~/.codex/config.toml.codex-omniroute-backup` | First-launch snapshot of the original file. `-Restore` puts it back byte-for-byte. |
+| `bridge.pid` (next to the launcher) | PID of the managed node bridge process. |
+| `bridge.log` (next to the launcher) | Append-only log of bridge activity. |
+
+That's it. No env-var overrides. No `.codex-omniroute-home/`. No payload copy. No registry edits. The official Codex package keeps its own identity and runs against your normal `%USERPROFILE%`, so file dialogs, `git`, SSH, your projects, your Documents, and your Desktop are all visible as usual.
 
 ## How to confirm rerouting is actually happening
 
@@ -39,25 +58,22 @@ Get-Content .\bridge.log -Tail 50 -Wait
 
 Every `/v1/responses` line on `bridge.log` is an inference call rerouted to OmniRoute. Compact / dictation calls show up as `official ->`.
 
-You can also hit the local health endpoint:
+You can also hit the local health endpoint (port is logged at launcher startup; default 20333):
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:20333/healthz
 ```
 
-(or whichever port the launcher picked — it logs the port at startup).
+## Switching back: -Restore vs Start-Codex-Official.ps1
 
-## Resetting the isolated runtime
+Both reverse OmniRoute mode. Use whichever fits your workflow:
 
-```powershell
-.\Start-Codex-OmniRoute.ps1 -Reset
-```
+- `Start-Codex-Official.ps1` — auto-restore + activate the official Codex GUI. Use this when you want to keep working in Codex but without OmniRoute.
+- `Start-Codex-OmniRoute.ps1 -Restore` — auto-restore without launching anything. Use this in scripts or when you don't want a Codex window.
 
-This deletes `.codex-omniroute-home/` and reseeds `auth.json`, `models_cache.json`, `installation_id` from your current official Codex profile. Use this if:
+Both delete `bridge.pid` and `config.toml.codex-omniroute-backup` once the restore is complete, so the next OmniRoute launch starts from a clean slate.
 
-- You changed accounts in the official Codex.
-- You suspect the isolated profile drifted.
-- You changed your official `config.toml` and want the OmniRoute mode to pick up the new MCP / Skills entries.
+If you ever want to inspect the OmniRoute-managed state without disturbing it, pass `-NoAutoRestore` to the official launcher (it'll resolve the package but skip the restore step).
 
 ## Tunneling OmniRoute
 
@@ -93,7 +109,7 @@ Never commit the connection ID.
 
 ## Bridge logs
 
-- `bridge.log` (in the workspace, gitignored) — bridge stdout/stderr, one event per request.
+- `bridge.log` (next to the launcher, gitignored) — bridge stdout/stderr, one event per request.
 - The bridge **never** logs `Authorization` headers, API keys, or `auth.json` contents.
 
 If you want quieter logs:
@@ -115,106 +131,68 @@ $env:CODEX_BRIDGE_LOG_LEVEL = "debug"
 .\Start-Codex-OmniRoute.ps1 -BridgePort 21000
 ```
 
-The launcher will search nearby ports if the preferred one is busy.
+The launcher will search nearby ports if the preferred one is busy and bake the actual chosen port into the managed `base_url`.
 
-## MCP transport: stdio shield (default ON)
-
-Codex talks to each MCP server over a stdio JSON-RPC pipe. On Windows, certain MCP server commands (powershell.exe wrappers, npx.cmd batch files, anything that uses `taskkill` for child cleanup) can leak human-readable text onto that stdout pipe — most often:
-
-```
-SUCCESS: The process with PID 12345 has been terminated.
-```
-
-When that happens, Codex's MCP host logs `Failed to parse MCP message` and the affected server is effectively dead — it shows up in the UI as "configured" but the agent sees zero tools/resources from it. This was the root cause of the "I have 12 MCPs in the UI but the agent only sees one" failure mode.
-
-The launcher's stdio shield is now **on by default**. Every inherited `[mcp_servers.<name>]` entry whose `command` is set (i.e. stdio MCPs, not URL-based ones) is rewritten in the isolated `config.toml` so it runs through `tools\mcp-stdio-shield.mjs`:
-
-- `command` becomes `node.exe` (the same node that runs the bridge).
-- `args` becomes `[<shield-script>, <original-command>, ...<original-args>]`.
-- Sub-tables like `[mcp_servers.<name>.env]` are left untouched, so per-server env passes through unchanged.
-
-The shield is a passthrough pipe: lines on the child's stdout whose first non-whitespace character is `{` or `[` are forwarded as JSON-RPC frames; anything else is rerouted to the shield's stderr with a `[mcp-stdio-shield] dropped non-JSON stdout line: ...` prefix, so it's observable in logs but never enters the JSON-RPC channel.
-
-URL-based MCP entries (no `command`, only `url`) are not touched.
-
-To **disable** the shield (e.g. if a specific MCP server has a JSON-RPC framing bug the shield doesn't tolerate, or if you're debugging stdio behavior), pass `-NoSanitizeMcpStdout`:
+## Pre-opening a project
 
 ```powershell
-.\Start-Codex-OmniRoute.ps1 -NoSanitizeMcpStdout
+.\Start-Codex-OmniRoute.ps1 -OpenProject 'C:\src\my-project'
 ```
 
-The legacy opt-in `-SanitizeMcpStdout` flag still works as a no-op force-on for callers that pinned to it.
+The path is forwarded to the AppX activation as the activation argument, which makes Codex open that workspace on start (same effect as dragging the folder onto the Codex window). The path can be a directory or a file; non-existent paths are rejected before the bridge is started.
 
-You can verify each MCP server actually transports JSON-RPC by running:
+## MCP
+
+MCP servers are inherited from your real `~/.codex/config.toml` automatically — OmniRoute doesn't touch them. The managed block only adds the `omniroute_bridge` provider and `omniroute_managed` profile; everything else (your `[mcp_servers.*]`, `[plugins.*]`, marketplaces) is preserved as-is.
+
+If a specific MCP server misbehaves (e.g. leaks non-JSON onto its JSON-RPC stdout pipe because it wraps `taskkill` or `powershell.exe`), the optional `tools/mcp-stdio-shield.mjs` wrapper drops non-JSON lines before they reach Codex. To use it, edit `~/.codex/config.toml` manually for that server:
+
+```toml
+[mcp_servers.noisy_server]
+command = "node"
+args = ["C:\\path\\to\\Codex-Omniroute\\tools\\mcp-stdio-shield.mjs", "<original-command>", "<original-args>..."]
+```
+
+It is **not** auto-applied — you only need it if you can actually reproduce a "Failed to parse MCP message" log line.
+
+For ad-hoc diagnostics on any MCP server, the `mcp_probe.mjs` tool spawns each `[mcp_servers.*]` entry, sends a single `initialize` JSON-RPC frame, and reports per-server whether a valid response came back within ~6s:
 
 ```powershell
-.\verify-codex-omniroute.ps1
+node .\tools\mcp_probe.mjs --json
 ```
 
-The `mcp-probe` check spawns each stdio server, sends a single `initialize` JSON-RPC request, and reports per-server whether a JSON frame was received within ~6s. A healthy isolated runtime shows `ok=N fail=0` (where `N` is the count of stdio MCP servers).
+By default it reads `~/.codex/config.toml`. Pass `--config <path>` to point it at a different file, or `--server <name>` to test a single server.
 
-## Choosing which account is seeded
+## apply_patch
 
-The launcher seeds `auth.json`, `models_cache.json`, and `installation_id` from your official Codex home (`%USERPROFILE%\.codex`) on a fresh isolated runtime. If your official profile is currently bound to the wrong account (e.g. you used another tool that overwrote it), you can override the source:
+In the simplified architecture, Codex is activated via the **AppX broker** (`IApplicationActivationManager.ActivateApplication`) — the exact same path the Start Menu takes. That preserves the package identity, so Codex's own `apply_patch.bat` inside `WindowsApps\OpenAI.Codex_<ver>\app\` is invocable normally and the `Access is denied` failure mode goes away.
+
+As a belt-and-suspenders measure the managed block also sets `experimental_use_freeform_apply_patch = true` (both as a bare top-level key and inside `[profiles.omniroute_managed.features]`). When the active model supports custom tools with grammar (GPT-5 family does), Codex routes patches through an in-process freeform tool instead of shelling out, so even if the package identity were lost again somehow, patch application would still work.
+
+To disable the freeform flag for debugging:
 
 ```powershell
-.\Start-Codex-OmniRoute.ps1 -Reset -AuthSource 'C:\path\to\saved\.codex'
+.\Start-Codex-OmniRoute.ps1 -NoFreeformApplyPatch
 ```
-
-Where `C:\path\to\saved\.codex` is any directory containing at least an `auth.json` for the desired account. `models_cache.json` and `installation_id` are looked up there too, falling back to your official Codex home for the ones that aren't present (those two are not account-bound). The override is also surfaced in launcher output as `[omniroute] auth source override: …`, so it's visible in `bridge.log`.
-
-`-Reset` is required when you change the auth source, because the launcher does not overwrite `auth.json` in an existing isolated runtime.
-
-## Freeform apply_patch + user-local Codex bin on PATH (both default ON)
-
-Without intervention, Codex's `apply_patch` chain is:
-```
-agent shell  ──►  apply_patch.bat  ──►  codex.exe --codex-run-as-apply-patch  ──►  Access is denied
-```
-
-The fail is rooted in Windows AppX containment: the bundled `codex.exe` lives in `C:\Program Files\WindowsApps\OpenAI.Codex_<ver>\app\resources\codex.exe`, which is only invocable from a parent process that holds the AppX package identity. `Start-Process Codex.exe` (what every non-Start-menu launch path does) gives Codex Desktop the package identity itself but does not propagate it to the shells Codex spawns; those shells then cannot re-invoke `codex.exe` directly and `apply_patch.bat` fails.
-
-OmniRoute attacks the problem from two independent angles, both default-on:
-
-**1. Freeform tool (`experimental_use_freeform_apply_patch`).** The launcher writes the flag into the managed block of the isolated `config.toml` in three places — bare top-level, inside a `[features]` table, and inside `[profiles.omniroute_managed]`. Codex's config schema accepts the flag in all three (per binary scan); empirically the per-profile placement is the one that actually activates the tool when an explicit `profile = ...` is selected, but the redundancy is harmless. When the flag is honored, patch application happens in-process inside the already-running Codex Desktop via a freeform tool call. No child shell, no AppX re-trigger.
-
-The flag has one hard dependency: **the active model must support custom tools with grammar**, which currently means GPT-5 family models. The default `model = "gpt-5.4"` qualifies. If you point the launcher at a non-GPT-5 model (`gpt-4.1`, `claude-*`, `gemini-*`), freeform tools cannot be issued and patch application falls back to the shell-path. The verifier's `freeform-model-compatible` check warns when this happens.
-
-**2. User-local Codex bin on PATH.** Codex Desktop, on first launch, unpacks its bundled CLI toolkit (`codex.exe`, `node.exe`, `rg.exe`, `codex-command-runner.exe`, etc.) into `%LOCALAPPDATA%\OpenAI\Codex\bin\`. Those copies are byte-identical to the WindowsApps versions but live in a user-writable, ACL-permissive directory, so they are freely invocable from any non-AppX child shell. The launcher prepends that directory to Codex's `PATH` so anywhere Codex resolves `codex.exe` via `PATH` lookup — most notably `apply_patch.bat` — lands on a working binary instead of the WindowsApps copy that triggers Access Denied.
-
-This is the **only** `PATH` modification the launcher performs. It is strictly additive (the user's prior `PATH` is appended unchanged after the prepend), the prepended directory lives entirely inside the isolated runtime home, and the executables it points at are byte-identical copies of Codex's own CLI — no shim, no semantic change.
-
-Even with the freeform tool active, leaving the `PATH` prepend on is cheap insurance: any other tool that resolves `codex.exe` via `PATH` (debug helpers, future Codex versions, third-party MCP servers that shell out to it) gets a working binary.
-
-To turn either off (debugging only):
-
-```powershell
-.\Start-Codex-OmniRoute.ps1 -NoFreeformApplyPatch       # disable freeform tool
-.\Start-Codex-OmniRoute.ps1 -NoLocalCodexBinPath        # disable PATH prepend
-```
-
-Neither flag is useful in production.
 
 ## When something goes wrong
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `Get-AppxPackage OpenAI.Codex returned nothing` | Codex Store app not installed under this Windows user. | Install from Store and sign in once. |
-| `models_cache_missing` from bridge `/v1/models` | Isolated `models_cache.json` not seeded. | Open the official Codex once, then re-run OmniRoute launcher (or use `-Reset`). |
-| `omniroute_not_configured` from bridge `/v1/responses` | No env vars, no `omniroute-provider.json`, no OpenCode-style entry. | Set `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY`. |
-| Codex feels "logged out" inside OmniRoute mode | `auth.json` not seeded. | Re-run launcher with `-Reset` after opening official Codex at least once. |
-| Compact or dictation fails with 401/403 from official upstream | Inbound auth missing and `auth.json` fallback insufficient. | Make sure the official Codex profile is fresh (re-login if needed) and use `-Reset`. |
-| `EADDRINUSE` | Another process holds the bridge port. | Pass `-BridgePort <free port>`. |
-| Codex window looks indistinguishable from official | That's the goal. The OmniRoute window is the same official binary running with an isolated `userData`. |
-| `Failed to parse MCP message` in Codex's MCP log; UI shows MCPs configured but agent only sees one of them | Some MCP server is leaking non-JSON onto its stdout. | The shield is on by default now — make sure you didn't pass `-NoSanitizeMcpStdout`. Re-run with `.\verify-codex-omniroute.ps1` to confirm `mcp-probe` reports `ok=N fail=0`. |
-| Documents / Spreadsheets / Presentations / `browser-use` capabilities don't appear | A previous launcher version inherited the user's global `[marketplaces.*]` and `[plugins.*]` entries, which point at `~\.cache\codex-runtimes\…` and confuse the isolated runtime. | `.\Start-Codex-OmniRoute.ps1 -Reset`. The current launcher's allowlist only inherits `[mcp_servers.*]`, so Codex bootstraps marketplaces/plugins fresh inside the isolated home. |
-| `apply_patch -h` returns `Access is denied` inside the agent shell | The agent is hitting the shell-path (`apply_patch.bat -> codex.exe`) and `PATH` lookup is landing on the WindowsApps-protected `codex.exe`, which is not invocable from a non-AppX child shell. | The launcher now both (a) writes `experimental_use_freeform_apply_patch = true` into the managed block in three locations (top-level, `[features]`, `[profiles.omniroute_managed]`) so Codex routes patches through an in-process freeform tool, and (b) prepends `%LOCALAPPDATA%\OpenAI\Codex\bin\` (where Codex Desktop has byte-identical copies of its CLI) to `PATH` so the shell-path also lands on a working binary. Re-run `.\verify-codex-omniroute.ps1` and confirm `freeform-flag-set` and `local-codex-bin-present` are PASS. If you still see Access Denied: (1) make sure you did not pass `-NoFreeformApplyPatch` AND `-NoLocalCodexBinPath`, (2) check the verifier's `freeform-model-compatible` row (a non-GPT-5 model disables freeform), and (3) close Codex completely before re-launching (a stale Codex Desktop window from before the fix keeps its old `PATH`). |
-| Wrong account seeded into the isolated runtime | `auth.json` was copied from `%USERPROFILE%\.codex\auth.json`, which is currently bound to a different account than you wanted. | Use `-AuthSource <dir>` with `-Reset` to point at any directory containing a saved `auth.json` for the desired account; see "Choosing which account is seeded" above. |
+| `Get-AppxPackage OpenAI.Codex returned nothing` | Codex Store app not installed under this Windows user. | Install from Microsoft Store and sign in once. |
+| `models_cache_missing` from bridge `/v1/models` | `~/.codex/models_cache.json` not populated yet. | Open the official Codex once so it can fetch the list from `chatgpt.com`, then re-run the OmniRoute launcher. |
+| `omniroute_not_configured` from bridge `/v1/responses` | No env vars, no `omniroute-provider.json`, no OpenCode-style entry. | Set `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` or run `Setup.bat` again. |
+| Codex feels "logged out" in OmniRoute mode | `~/.codex/auth.json` is empty or missing. | Open the official Codex once and sign in. The bridge reads your real `auth.json` for compact/dictation auth fallback. |
+| Compact or dictation fails with 401/403 from official upstream | Inbound auth missing and `auth.json` fallback insufficient. | Make sure the official Codex is signed in. Re-open it once to refresh the token. |
+| `EADDRINUSE` | Another process holds the bridge port. | Pass `-BridgePort <free port>`, or run `.\Start-Codex-OmniRoute.ps1 -Restore` to stop the previous bridge. |
+| `Failed to parse MCP message` in Codex's MCP log | Some MCP server is leaking non-JSON onto its stdout. | Wrap that single server with `tools\mcp-stdio-shield.mjs` (see MCP section above). |
+| Codex window looks indistinguishable from official Codex | That's the goal. The only thing different is where `/v1/responses` goes. |
+| You want a clean slate | Stop everything and revert your config. | `.\Start-Codex-OmniRoute.ps1 -Restore` |
 
 ## What gets gitignored (do not commit these)
 
-- `.codex-omniroute-home/` — isolated runtime home, contains seeded `auth.json`.
-- `bridge.pid`, `bridge.log` — workspace-managed bridge artifacts.
+- `bridge.pid`, `bridge.log` — managed bridge artifacts.
 - `omniroute-provider.json`, `.env`, `auth.json`, `models_cache.json`, `installation_id` — secrets / personal state.
+- `.codex-omniroute-home/` — kept ignored for backward compatibility with older clones; the current architecture never creates it.
 
-The `.gitignore` enforces this. Double-check before pushing.
+The `.gitignore` enforces all of this. Double-check `git status` before pushing if you've been editing config by hand.

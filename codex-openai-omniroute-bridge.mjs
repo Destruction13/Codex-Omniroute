@@ -3,8 +3,8 @@
  * Codex OmniRoute — local OpenAI-compatible bridge.
  *
  * Narrow waist of the architecture. The official Microsoft Store Codex app
- * (launched via Start-Codex-OmniRoute.ps1 with an isolated runtime home) is
- * pointed at this server via:
+ * (launched via Start-Codex-OmniRoute.ps1, which writes a managed block into
+ * the user's normal ~/.codex/config.toml) is pointed at this server via:
  *
  *   [model_providers.omniroute_bridge]
  *   base_url = "http://127.0.0.1:<PORT>/v1"
@@ -14,7 +14,7 @@
  *
  * Behavior summary
  *   /healthz                       -> local status
- *   GET  /v1/models                -> isolated models_cache.json (NOT OmniRoute)
+ *   GET  /v1/models                -> local models_cache.json from $CODEX_HOME (NOT OmniRoute)
  *   POST /v1/responses             -> OmniRoute (main reasoning)
  *   POST /v1/chat/completions      -> OmniRoute (main reasoning)
  *   POST /v1/responses/compact     -> official upstream
@@ -58,8 +58,8 @@ const OFFICIAL_UPSTREAM = stripTrailingSlash(
 );
 
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const ISOLATED_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
-const ISOLATED_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
+const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
+const CODEX_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
 
 const OMNIROUTE_BASE_URL_ENV = stripTrailingSlash(process.env.OMNIROUTE_BASE_URL || "");
 const OMNIROUTE_API_KEY_ENV = process.env.OMNIROUTE_API_KEY || "";
@@ -238,7 +238,7 @@ async function resolveProvider() {
 }
 
 // ----------------------------------------------------------------------------
-// Official auth fallback (auth.json from the isolated runtime home)
+// Official auth fallback (auth.json from $CODEX_HOME)
 // ----------------------------------------------------------------------------
 
 let OFFICIAL_AUTH_CACHE = { loadedAt: 0, value: null };
@@ -248,7 +248,7 @@ async function loadOfficialAuth() {
   if (Date.now() - OFFICIAL_AUTH_CACHE.loadedAt < 5000 && OFFICIAL_AUTH_CACHE.value) {
     return OFFICIAL_AUTH_CACHE.value;
   }
-  const auth = await tryReadJson(ISOLATED_AUTH_PATH);
+  const auth = await tryReadJson(CODEX_AUTH_PATH);
   OFFICIAL_AUTH_CACHE = { loadedAt: Date.now(), value: auth };
   return auth;
 }
@@ -531,14 +531,16 @@ async function handleHealth(req, res) {
         gpt55_pin_enabled: Boolean(provider?.gpt55_pin?.enabled && provider?.gpt55_pin?.connection_id),
       },
       official_auth_present: Boolean(extractOfficialBearer(auth)),
-      models_cache_present: await pathExists(ISOLATED_MODELS_PATH),
+      models_cache_present: await pathExists(CODEX_MODELS_PATH),
     }),
   );
 }
 
 async function handleModels(req, res) {
-  // ALWAYS serve from isolated models_cache.json — never from OmniRoute.
-  const cache = await tryReadJson(ISOLATED_MODELS_PATH);
+  // ALWAYS serve from local models_cache.json under $CODEX_HOME — never
+  // from OmniRoute. This is the same file the official Codex Desktop
+  // populates from chatgpt.com/backend-api/codex/models.
+  const cache = await tryReadJson(CODEX_MODELS_PATH);
   if (cache) {
     res.statusCode = 200;
     res.setHeader("content-type", "application/json");
@@ -552,7 +554,7 @@ async function handleModels(req, res) {
   res.end(
     JSON.stringify({
       error: "models_cache_missing",
-      detail: `Seed ${ISOLATED_MODELS_PATH} from your official Codex profile before launching OmniRoute mode.`,
+      detail: `${CODEX_MODELS_PATH} is missing. Launch the official Codex app once so it can populate this file from chatgpt.com.`,
     }),
   );
 }
