@@ -6,35 +6,37 @@
     Launches the *unmodified* Microsoft Store Codex app with NO
     OmniRoute environment overrides, NO bridge, and NO helper processes.
 
-    Before launching, this script automatically reverses any OmniRoute
-    side-effects:
-      - if a backup of the user's original config.toml is present (left
-        by Start-Codex-OmniRoute.ps1), it is restored;
-      - if a backup of the user's original auth.json is present, it is
-        restored (or the managed sentinel file is deleted if no original
-        existed);
-      - any running managed bridge process is stopped.
-    The user therefore gets pristine vanilla Codex — including their real
-    ChatGPT OAuth session — even if they had OmniRoute mode active
-    moments before.
+    Under the Variant-3 architecture the OmniRoute launcher does NOT
+    modify the user's real ~/.codex directory (no backup, no managed
+    block in config.toml, no sentinel auth.json). All OmniRoute state
+    lives in a side directory (".codex-omniroute-home" next to the
+    OmniRoute launcher), which Start-Codex-OmniRoute.ps1 -Restore
+    wipes. As a result there is NO restore-of-real-config to do here:
+    this launcher just stops a running managed bridge and activates
+    Codex.
 
-    Companion: Start-Codex-OmniRoute.ps1 (OmniRoute mode).
+    For users upgrading from earlier versions (PR #3 or PR #2) we DO
+    still sweep up any legacy artifacts those launchers left in the
+    user's real ~/.codex (managed block, sentinel auth.json,
+    *.codex-omniroute-backup files). That sweep is a one-shot
+    reverse-of-old-architecture: subsequent launches see nothing to
+    clean.
 
 .PARAMETER DryRun
-    Resolve the Codex package and print what would be launched, but do not
-    actually start the app. Useful for verification scripts.
+    Resolve the Codex package and print what would be launched, but do
+    not actually start the app. Useful for verification scripts.
 
 .PARAMETER NoAutoRestore
-    Skip the automatic config restore + bridge shutdown step. Mostly
-    useful for verification scripts that want to inspect the current
-    OmniRoute-managed state without disturbing it.
+    Skip the auto-stop of the managed bridge and the legacy-cleanup
+    pass. Mostly useful for verification scripts that want to inspect
+    the current state without disturbing it.
 
 .NOTES
     - Resolves the Store-installed package dynamically via
       Get-AppxPackage OpenAI.Codex; the AppUserModelID is not hardcoded.
     - Inherits the user's environment unchanged. No CODEX_HOME,
-      OMNIROUTE_*, CODEX_BRIDGE_*, or CODEX_ELECTRON_USER_DATA_PATH is set
-      by this script.
+      OMNIROUTE_*, CODEX_BRIDGE_*, or CODEX_ELECTRON_USER_DATA_PATH is
+      set by this script.
     - Exits non-zero if the official package is not installed.
 #>
 
@@ -162,18 +164,27 @@ public static class CodexOfficialAppxActivator {
 }
 
 # ----------------------------------------------------------------------------
-# Auto-restore helpers (reverse OmniRoute side-effects on ~/.codex/config.toml)
+# Legacy PR-#2 / PR-#3 cleanup (managed block + sentinel auth.json)
+#
+# Variant 3 does NOT write either into the user's real ~/.codex, so this
+# cleanup is purely a one-shot reverse-of-old-architecture for users
+# upgrading from earlier repo versions. On a fresh install or after the
+# first run of the v3 launchers, the cleanup finds nothing and exits.
 # ----------------------------------------------------------------------------
 
-$ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
-$ManagedBlockEnd   = '# <<< codex-omniroute-managed'
+$LegacyManagedBlockBegin       = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
+$LegacyManagedBlockEnd         = '# <<< codex-omniroute-managed'
+$LegacyManagedAuthSentinelKey  = 'sk-omniroute-managed'
 
-# Sentinel API key written into the managed ~/.codex/auth.json by
-# Start-Codex-OmniRoute.ps1. Keep in sync with $ManagedAuthSentinelApiKey
-# there and MANAGED_AUTH_SENTINEL in codex-openai-omniroute-bridge.mjs.
-$ManagedAuthSentinelApiKey = 'sk-omniroute-managed'
+function Remove-LegacyManagedBlockText {
+    param([string]$Content)
+    if ($null -eq $Content -or $Content.Length -eq 0) { return $Content }
+    $pattern = '(?ms)^[\t ]*' + [regex]::Escape($LegacyManagedBlockBegin) + '[\s\S]*?' + [regex]::Escape($LegacyManagedBlockEnd) + '[\t ]*\r?\n?'
+    $stripped = [regex]::Replace($Content, $pattern, '')
+    return [regex]::Replace($stripped, '(\r?\n){3,}', "`r`n`r`n")
+}
 
-function Test-IsOmniRouteManagedAuth {
+function Test-IsLegacyManagedAuth {
     param([string]$Content)
     if ([string]::IsNullOrWhiteSpace($Content)) { return $false }
     try {
@@ -190,7 +201,7 @@ function Test-IsOmniRouteManagedAuth {
     $hasSentinel = $false
     try {
         if ($obj.PSObject.Properties.Name -contains 'OPENAI_API_KEY') {
-            if ([string]$obj.OPENAI_API_KEY -eq $ManagedAuthSentinelApiKey) {
+            if ([string]$obj.OPENAI_API_KEY -eq $LegacyManagedAuthSentinelKey) {
                 $hasSentinel = $true
             }
         }
@@ -198,79 +209,91 @@ function Test-IsOmniRouteManagedAuth {
     return ($hasMarker -or $hasSentinel)
 }
 
-function Remove-OmniRouteManagedBlock {
-    param([string]$Content)
-    if ($null -eq $Content -or $Content.Length -eq 0) { return $Content }
-    $pattern = '(?ms)^[\t ]*' + [regex]::Escape($ManagedBlockBegin) + '[\s\S]*?' + [regex]::Escape($ManagedBlockEnd) + '[\t ]*\r?\n?'
-    $stripped = [regex]::Replace($Content, $pattern, '')
-    return [regex]::Replace($stripped, '(\r?\n){3,}', "`r`n`r`n")
-}
-
-function Restore-OmniRouteConfigToml {
+function Restore-LegacyConfigToml {
     param(
         [Parameter(Mandatory = $true)][string]$ConfigPath,
         [Parameter(Mandatory = $true)][string]$BackupPath
     )
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     if (Test-Path -LiteralPath $BackupPath) {
         $backup = Get-Content -LiteralPath $BackupPath -Raw
         if ($null -eq $backup) { $backup = '' }
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         if ($backup.Length -eq 0) {
             if (Test-Path -LiteralPath $ConfigPath) {
                 Remove-Item -LiteralPath $ConfigPath -Force
-                Write-Host "[official] removed OmniRoute-managed config $ConfigPath (no original existed)"
+                Write-Host "[official] legacy cleanup: removed managed-only config.toml $ConfigPath"
             }
         } else {
             [System.IO.File]::WriteAllText($ConfigPath, $backup, $utf8NoBom)
-            Write-Host "[official] restored original config from $BackupPath"
+            Write-Host "[official] legacy cleanup: restored original config.toml from $BackupPath"
         }
         Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
         return
     }
 
-    # No backup -- strip any orphan managed block in place.
     if (Test-Path -LiteralPath $ConfigPath) {
         $existing = Get-Content -LiteralPath $ConfigPath -Raw
-        if ($existing -and $existing.Contains($ManagedBlockBegin)) {
-            $stripped = Remove-OmniRouteManagedBlock -Content $existing
-            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        if ($existing -and $existing.Contains($LegacyManagedBlockBegin)) {
+            $stripped = Remove-LegacyManagedBlockText -Content $existing
             [System.IO.File]::WriteAllText($ConfigPath, $stripped, $utf8NoBom)
-            Write-Host "[official] stripped OmniRoute managed block from $ConfigPath (no backup available)"
+            Write-Host "[official] legacy cleanup: stripped managed block from $ConfigPath"
         }
     }
 }
 
-function Restore-OmniRouteAuthJson {
+function Restore-LegacyAuthJson {
     param(
         [Parameter(Mandatory = $true)][string]$AuthPath,
         [Parameter(Mandatory = $true)][string]$BackupPath
     )
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     if (Test-Path -LiteralPath $BackupPath) {
         $backup = Get-Content -LiteralPath $BackupPath -Raw
         if ($null -eq $backup) { $backup = '' }
-        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         if ($backup.Length -eq 0) {
             if (Test-Path -LiteralPath $AuthPath) {
-                Remove-Item -LiteralPath $AuthPath -Force
-                Write-Host "[official] removed OmniRoute-managed auth.json $AuthPath (no original existed)"
+                $existing = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction SilentlyContinue
+                if ($null -ne $existing -and (Test-IsLegacyManagedAuth -Content $existing)) {
+                    Remove-Item -LiteralPath $AuthPath -Force
+                    Write-Host "[official] legacy cleanup: removed sentinel auth.json $AuthPath"
+                }
             }
         } else {
             [System.IO.File]::WriteAllText($AuthPath, $backup, $utf8NoBom)
-            Write-Host "[official] restored original auth.json from $BackupPath"
+            Write-Host "[official] legacy cleanup: restored original auth.json from $BackupPath"
         }
         Remove-Item -LiteralPath $BackupPath -Force -ErrorAction SilentlyContinue
         return
     }
 
-    # No backup -- best-effort: if the live file is our managed sentinel,
-    # remove it; otherwise leave the user's file untouched.
     if (Test-Path -LiteralPath $AuthPath) {
         $existing = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction SilentlyContinue
-        if ($null -ne $existing -and (Test-IsOmniRouteManagedAuth -Content $existing)) {
+        if ($null -ne $existing -and (Test-IsLegacyManagedAuth -Content $existing)) {
             Remove-Item -LiteralPath $AuthPath -Force
-            Write-Host "[official] removed orphan OmniRoute-managed auth.json $AuthPath (no backup available)"
+            Write-Host "[official] legacy cleanup: removed orphan sentinel auth.json $AuthPath"
         }
     }
+}
+
+function Stop-ManagedBridge {
+    param([string]$PidPath)
+    if (-not (Test-Path -LiteralPath $PidPath)) { return }
+    try {
+        $pidText = (Get-Content -LiteralPath $PidPath -Raw).Trim()
+    } catch { return }
+    if (-not ($pidText -match '^\d+$')) {
+        Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $existingPid = [int]$pidText
+    try {
+        $proc = Get-Process -Id $existingPid -ErrorAction Stop
+        if ($proc.ProcessName -match '^node') {
+            Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
+            Write-Host "[official] stopped OmniRoute bridge (pid=$existingPid)"
+        }
+    } catch { } # already gone
+    Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
 }
 
 function Invoke-AutoRestore {
@@ -288,27 +311,15 @@ function Invoke-AutoRestore {
     $authPath       = Join-Path $codexHome 'auth.json'
     $authBackupPath = Join-Path $codexHome 'auth.json.codex-omniroute-backup'
 
-    # Stop any OmniRoute-managed bridge. The pid file lives next to this
-    # script (same convention used by Start-Codex-OmniRoute.ps1).
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Split-Path -Parent $MyInvocation.MyCommand.Path) }
     if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
-    $bridgePid = Join-Path $scriptDir 'bridge.pid'
-    if (Test-Path -LiteralPath $bridgePid) {
-        try {
-            $pidText = (Get-Content -LiteralPath $bridgePid -Raw).Trim()
-            if ($pidText -match '^\d+$') {
-                $existing = Get-Process -Id ([int]$pidText) -ErrorAction SilentlyContinue
-                if ($existing -and $existing.ProcessName -match '^node') {
-                    Stop-Process -Id ([int]$pidText) -Force -ErrorAction SilentlyContinue
-                    Write-Host "[official] stopped OmniRoute bridge (pid=$pidText)"
-                }
-            }
-        } catch { }
-        Remove-Item -LiteralPath $bridgePid -Force -ErrorAction SilentlyContinue
-    }
+    $bridgePidPath = Join-Path $scriptDir 'bridge.pid'
 
-    Restore-OmniRouteConfigToml -ConfigPath $configPath -BackupPath $backupPath
-    Restore-OmniRouteAuthJson   -AuthPath   $authPath   -BackupPath $authBackupPath
+    Stop-ManagedBridge -PidPath $bridgePidPath
+
+    # Legacy cleanup: only acts if PR-#2 / PR-#3 artifacts are present.
+    Restore-LegacyConfigToml -ConfigPath $configPath -BackupPath $backupPath
+    Restore-LegacyAuthJson   -AuthPath   $authPath   -BackupPath $authBackupPath
 }
 
 if (-not $NoAutoRestore) {

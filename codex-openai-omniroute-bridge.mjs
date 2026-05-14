@@ -2,21 +2,40 @@
 /*
  * Codex OmniRoute — local OpenAI-compatible bridge.
  *
- * Narrow waist of the architecture. The official Microsoft Store Codex app
- * (launched via Start-Codex-OmniRoute.ps1, which writes a managed block into
- * the user's normal ~/.codex/config.toml) is pointed at this server via:
+ * Narrow waist of the Variant-3 architecture. The official Microsoft Store
+ * Codex app (launched via Start-Codex-OmniRoute.ps1) runs against an
+ * isolated CODEX_HOME (".codex-omniroute-home" next to the launcher). The
+ * launcher seeds that directory with:
+ *   - auth.json         : the user's real OAuth tokens copied verbatim from
+ *                         their normal ~/.codex/auth.json (Codex Desktop
+ *                         stays logged in as the user; fast mode +
+ *                         ChatGPT credits keep working).
+ *   - models_cache.json : copied from real ~/.codex if present.
+ *   - config.toml       : written fresh by the launcher, selects
+ *                         model_provider = "omniroute_bridge" pointing
+ *                         at this bridge:
  *
- *   [model_providers.omniroute_bridge]
- *   base_url = "http://127.0.0.1:<PORT>/v1"
- *   wire_api = "responses"
- *   requires_openai_auth = true
- *   supports_websockets = false
+ *                           [model_providers.omniroute_bridge]
+ *                           base_url = "http://127.0.0.1:<PORT>/v1"
+ *                           wire_api = "responses"
+ *                           requires_openai_auth = true
+ *                           supports_websockets = false
+ *
+ * state_5.sqlite is deliberately absent in the isolated dir so Codex
+ * Desktop starts with an empty thread store and reads model_provider
+ * from the freshly-written config.toml on the first new thread.
+ *
+ * The bridge reads $CODEX_HOME/auth.json directly to recover the real
+ * OAuth bearer for compact + dictation passthrough — no sentinel auth
+ * scheme, no CODEX_OFFICIAL_AUTH_PATH redirection. Codex Desktop sends
+ * the same real bearer on its requests, so the official-passthrough
+ * path forwards it verbatim.
  *
  * Behavior summary
  *   /healthz                       -> local status
  *   GET  /v1/models                -> local models_cache.json from $CODEX_HOME (NOT OmniRoute)
- *   POST /v1/responses             -> OmniRoute (main reasoning)
- *   POST /v1/chat/completions      -> OmniRoute (main reasoning)
+ *   POST /v1/responses             -> OmniRoute (main reasoning, counted)
+ *   POST /v1/chat/completions      -> OmniRoute (main reasoning, counted)
  *   POST /v1/responses/compact     -> official upstream
  *   POST /v1/audio/transcriptions  -> official upstream
  *   POST /transcribe               -> official upstream /audio/transcriptions
@@ -57,21 +76,18 @@ const OFFICIAL_UPSTREAM = stripTrailingSlash(
   process.env.CODEX_OFFICIAL_UPSTREAM || "https://chatgpt.com/backend-api/codex",
 );
 
+// CODEX_HOME under Variant 3 is the isolated ".codex-omniroute-home"
+// directory next to the launcher. The launcher seeds it on every boot:
+// auth.json comes from the user's real ~/.codex/auth.json (so Codex
+// Desktop stays signed in), models_cache.json is copied if present, and
+// config.toml is written from scratch. The bridge reads auth.json from
+// here for the official-passthrough fallback, and models_cache.json for
+// /v1/models. No CODEX_OFFICIAL_AUTH_PATH redirection: Codex Desktop
+// sends the real OAuth bearer on its requests, so we forward it as-is.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-// When the OmniRoute launcher rewrites $CODEX_HOME/auth.json into a managed
-// API-key sentinel (so Codex Desktop is forced into API-key auth mode and
-// stops bypassing the bridge), the user's *real* OAuth/ChatGPT session
-// tokens live in the backup file. CODEX_OFFICIAL_AUTH_PATH lets the
-// launcher tell the bridge to read auth from that backup instead of the
-// managed file, so compact and dictation passthroughs still succeed
-// against the official upstream. Falls back to the default $CODEX_HOME
-// path when not set (standalone bridge / vanilla Codex).
-const CODEX_AUTH_PATH =
-  typeof process.env.CODEX_OFFICIAL_AUTH_PATH === "string" &&
-  process.env.CODEX_OFFICIAL_AUTH_PATH.length > 0
-    ? process.env.CODEX_OFFICIAL_AUTH_PATH
-    : path.join(CODEX_HOME, "auth.json");
+const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
 const CODEX_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
+const CODEX_SEED_STAMP_PATH = path.join(CODEX_HOME, ".omniroute-seed.json");
 
 const OMNIROUTE_BASE_URL_ENV = stripTrailingSlash(process.env.OMNIROUTE_BASE_URL || "");
 const OMNIROUTE_API_KEY_ENV = process.env.OMNIROUTE_API_KEY || "";
@@ -84,14 +100,6 @@ const PROVIDER_JSON_PATH = path.resolve(
 );
 const OPENCODE_AUTH_PATH = path.join(os.homedir(), ".config", "opencode", "auth.json");
 const OPENCODE_PROVIDER_NAMES = ["cloud_omni", "miracloud", "omniroute"];
-
-// Sentinel Bearer the OmniRoute launcher writes into the managed
-// $CODEX_HOME/auth.json. It is never a valid credential against any real
-// upstream; it exists only to flip Codex Desktop into API-key auth mode so
-// the bridge actually sees /v1/responses. The bridge strips it on the
-// official-passthrough path and uses the real OAuth tokens loaded from the
-// backup file instead (see CODEX_OFFICIAL_AUTH_PATH above).
-const MANAGED_AUTH_SENTINEL = "sk-omniroute-managed";
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEX_BRIDGE_REQUEST_TIMEOUT_MS || "300000", 10);
 const LOG_LEVEL = (process.env.CODEX_BRIDGE_LOG_LEVEL || "info").toLowerCase();
@@ -184,6 +192,13 @@ function redactReplacer(key, value) {
 // ----------------------------------------------------------------------------
 
 let PROVIDER = null; // { base_url, api_key, model_prefix, default_model, headers, gpt55_pin }
+
+// Counter incremented every time handleOmniRoutePost forwards a request
+// to OmniRoute (main reasoning). Exposed on /healthz so the operator can
+// confirm via a single curl that Codex Desktop is actually routing
+// through the bridge instead of bypassing it. If this stays at 0 after
+// the user has sent a chat message, the bridge was bypassed.
+let MAIN_REASONING_HITS = 0;
 
 async function resolveProvider() {
   if (PROVIDER) return PROVIDER;
@@ -460,15 +475,12 @@ function buildForwardHeaders(inboundHeaders, mode, provider, officialAuth) {
     for (const [k, v] of Object.entries(provider.headers || {})) out[k] = String(v);
     out["x-omniroute-client"] = out["x-omniroute-client"] || "codex-omniroute-bridge";
   } else if (mode === "official") {
-    // If Codex Desktop is in OmniRoute-managed API-key mode it is sending
-    // the sentinel Bearer (sk-omniroute-managed) on every request,
-    // including compact / dictation. That value is not valid against
-    // chatgpt.com — strip it and substitute the real OAuth bearer loaded
-    // from the backup auth.json (see CODEX_OFFICIAL_AUTH_PATH).
-    const inboundAuth = out["authorization"];
-    if (typeof inboundAuth === "string" && inboundAuth.includes(MANAGED_AUTH_SENTINEL)) {
-      delete out["authorization"];
-    }
+    // Codex Desktop is sending its real OAuth bearer (loaded from the
+    // isolated $CODEX_HOME/auth.json, which the launcher seeded from
+    // the user's real ~/.codex/auth.json), so the simple thing is to
+    // pass it straight through to chatgpt.com. Only fall back to the
+    // auth.json on disk if the inbound request didn't have one, e.g.
+    // because something probed /transcribe directly without a bearer.
     if (!out["authorization"] && officialAuth?.bearer) {
       out["authorization"] = `Bearer ${officialAuth.bearer}`;
     }
@@ -539,26 +551,7 @@ function forwardOutbound({ target, method, headers, bodyBuf, clientRes, isStream
 async function handleHealth(req, res) {
   const provider = await resolveProvider();
   const auth = await loadOfficialAuth();
-
-  // Inspect the *live* $CODEX_HOME/auth.json (not the override at
-  // CODEX_AUTH_PATH) so the verifier can confirm Codex Desktop is being
-  // pointed at the API-key sentinel and is NOT silently falling back to a
-  // ChatGPT OAuth session.
-  const liveAuthPath = path.join(CODEX_HOME, "auth.json");
-  const liveAuth = await tryReadJson(liveAuthPath);
-  const liveHasOAuthTokens = Boolean(
-    liveAuth &&
-      typeof liveAuth === "object" &&
-      liveAuth.tokens &&
-      typeof liveAuth.tokens === "object" &&
-      typeof liveAuth.tokens.access_token === "string" &&
-      liveAuth.tokens.access_token.length > 0,
-  );
-  const liveHasSentinel = Boolean(
-    liveAuth &&
-      typeof liveAuth === "object" &&
-      liveAuth.OPENAI_API_KEY === MANAGED_AUTH_SENTINEL,
-  );
+  const homeStatus = await inspectIsolatedCodexHome();
 
   res.statusCode = 200;
   res.setHeader("content-type", "application/json");
@@ -582,16 +575,22 @@ async function handleHealth(req, res) {
       },
       official_auth_path: CODEX_AUTH_PATH,
       official_auth_present: Boolean(extractOfficialBearer(auth)),
-      managed_auth: {
-        // Codex Desktop reads $CODEX_HOME/auth.json. These three flags let
-        // the verifier prove main-chat reasoning will hit the bridge:
-        //   - sentinel_present=true && oauth_tokens_present=false means
-        //     Desktop is in API-key auth mode and CANNOT bypass us via a
-        //     ChatGPT OAuth session.
-        //   - oauth_tokens_present=true is the regression we are fixing.
-        live_path: liveAuthPath,
-        sentinel_present: liveHasSentinel,
-        oauth_tokens_present: liveHasOAuthTokens,
+      // Variant-3 diagnostics. The launcher seeds CODEX_HOME with a
+      // .omniroute-seed.json stamp listing every file it wrote. We
+      // compare that stamp against the current directory contents to
+      // tell whether Codex Desktop is actually using CODEX_HOME (it
+      // would create state_5.sqlite and rewrite auth.json over time).
+      // main_reasoning_hits counts requests rerouted to OmniRoute since
+      // boot; if it stays at 0 after the user sends a chat message,
+      // Desktop ignored CODEX_HOME and bypassed the bridge.
+      main_reasoning_hits: MAIN_REASONING_HITS,
+      desktop_codex_home_honored: homeStatus.honored,
+      isolated_home: {
+        seed_stamp_path: CODEX_SEED_STAMP_PATH,
+        seed_stamp_present: homeStatus.stampPresent,
+        new_files: homeStatus.newFiles,
+        modified_files: homeStatus.modifiedFiles,
+        state_sqlite_present: homeStatus.stateSqlitePresent,
       },
       models_cache_present: await pathExists(CODEX_MODELS_PATH),
     }),
@@ -652,6 +651,11 @@ async function handleOmniRoutePost(req, res, suffix) {
   const headers = buildForwardHeaders(req.headers, "omniroute", provider, null);
   headers["content-type"] = "application/json";
   headers["content-length"] = String(bodyBuf.length);
+  // Increment BEFORE forwarding: the metric tracks "did Codex Desktop
+  // route through us at all", not "did OmniRoute succeed". Even if the
+  // upstream returns 502, the fact that the bridge handled the request
+  // is enough to prove CODEX_HOME isolation is working.
+  MAIN_REASONING_HITS += 1;
   log("info", "omniroute ->", target.href, `bytes=${bodyBuf.length}`);
   forwardOutbound({ target, method: "POST", headers, bodyBuf, clientRes: res, isStreaming: true });
 }
@@ -774,6 +778,92 @@ async function tryReadJson(p) {
   } catch {
     return null;
   }
+}
+
+// Compare the current $CODEX_HOME directory against the .omniroute-seed.json
+// stamp the launcher wrote at boot. Returns:
+//   stampPresent          : did the launcher write a seed stamp at all?
+//   stateSqlitePresent    : does state_5.sqlite (or any sqlite sidecar) exist
+//                            in $CODEX_HOME now? Codex Desktop only creates it
+//                            when it boots against this CODEX_HOME.
+//   newFiles              : files in $CODEX_HOME that the launcher did NOT
+//                            write at seed time. Anything here means a
+//                            running Codex Desktop has touched the directory.
+//   modifiedFiles         : seeded files whose mtime or size has changed
+//                            since the stamp (e.g. Desktop refreshed
+//                            auth.json on a token rotation).
+//   honored               : convenience boolean. true iff Desktop has
+//                            measurably touched the isolated dir (state_5
+//                            present || any new/modified file). The operator
+//                            can poll /healthz once after sending a chat
+//                            message and use this to decide whether to fall
+//                            back to a different isolation strategy.
+// The function is best-effort: any I/O failure returns honored=false with
+// the stamp_present=false so the verifier surfaces it instead of crashing.
+async function inspectIsolatedCodexHome() {
+  const result = {
+    stampPresent: false,
+    stateSqlitePresent: false,
+    newFiles: [],
+    modifiedFiles: [],
+    honored: false,
+  };
+  let stamp = null;
+  try {
+    stamp = await tryReadJson(CODEX_SEED_STAMP_PATH);
+  } catch {
+    stamp = null;
+  }
+  result.stampPresent = Boolean(stamp);
+
+  let entries = [];
+  try {
+    entries = await fs.readdir(CODEX_HOME, { withFileTypes: true });
+  } catch {
+    return result;
+  }
+
+  const stampedByName = new Map();
+  if (stamp && Array.isArray(stamp.files)) {
+    for (const f of stamp.files) {
+      if (f && typeof f.name === "string") stampedByName.set(f.name, f);
+    }
+  }
+
+  for (const ent of entries) {
+    if (!ent.isFile()) continue;
+    const name = ent.name;
+    // Skip the stamp itself.
+    if (name === ".omniroute-seed.json") continue;
+    // state_5.sqlite (and its WAL/journal/shm sidecars) is the single most
+    // load-bearing signal that Desktop is using this CODEX_HOME.
+    if (/^state_\d+\.sqlite(?:-journal|-wal|-shm)?$/.test(name)) {
+      result.stateSqlitePresent = true;
+    }
+    let stat = null;
+    try {
+      stat = await fs.stat(path.join(CODEX_HOME, name));
+    } catch {
+      continue;
+    }
+    const stamped = stampedByName.get(name);
+    if (!stamped) {
+      result.newFiles.push(name);
+      continue;
+    }
+    const stampedSize = typeof stamped.size === "number" ? stamped.size : null;
+    const stampedMtime = stamped.mtime ? Date.parse(stamped.mtime) : NaN;
+    if (stampedSize !== null && stat.size !== stampedSize) {
+      result.modifiedFiles.push(name);
+    } else if (!Number.isNaN(stampedMtime) && Math.abs(stat.mtimeMs - stampedMtime) > 1000) {
+      // Allow ~1s drift to absorb filesystem rounding (FAT, network mounts).
+      result.modifiedFiles.push(name);
+    }
+  }
+
+  result.honored =
+    result.stateSqlitePresent || result.newFiles.length > 0 || result.modifiedFiles.length > 0;
+  return result;
 }
 
 // ----------------------------------------------------------------------------
