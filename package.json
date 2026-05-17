@@ -11,6 +11,6 @@
   "scripts": {
     "bridge": "node ./codex-openai-omniroute-bridge.mjs",
     "mock-transcribe": "node ./mock-transcribe-upstream.mjs",
-    "check": "node --check ./codex-openai-omniroute-bridge.mjs && node --check ./mock-transcribe-upstream.mjs"
+    "check": "node --check ./codex-openai-omniroute-bridge.mjs && node --check ./mock-transcribe-upstream.mjs && node --check ./tools/omniroute-catalog.mjs"
   }
 }

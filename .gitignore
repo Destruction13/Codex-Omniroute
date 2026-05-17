@@ -49,3 +49,9 @@ Thumbs.db
 tools/__pycache__/
 *.pyc
 mock-transcribe-upstream.log
+
+# OmniRoute MCP/skills catalog cache (last-known-good copy of the remote
+# catalog; refreshed by tools/omniroute-catalog.mjs on every launch when
+# OMNIROUTE_CATALOG_URL is set). Never commit -- the in-repo bundle
+# default-mcp-catalog.json is the only catalog tracked in git.
+.codex-omniroute-catalog-cache.json

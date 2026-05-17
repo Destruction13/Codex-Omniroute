@@ -1,0 +1,35 @@
+{
+  "_comment": "Codex OmniRoute -- bundled default catalog. Shipped with the fork so every user gets a working baseline MCP / skills set on first launch, even with no OmniRoute server reachable. Updates can flow centrally by setting OMNIROUTE_CATALOG_URL; see tools/omniroute-catalog.mjs.",
+  "version": "2026-05-17",
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio_local",
+      "package": "@modelcontextprotocol/server-filesystem",
+      "version": "latest",
+      "args": ["${USERPROFILE}"],
+      "_doc": "Read/write access to the user's home directory. Args expand via process.env at write time, so the resulting config.toml is portable across machines."
+    },
+    {
+      "name": "sequential-thinking",
+      "transport": "stdio_local",
+      "package": "@modelcontextprotocol/server-sequential-thinking",
+      "version": "latest",
+      "_doc": "Structured chain-of-thought scratchpad. No auth required."
+    },
+    {
+      "name": "everything",
+      "transport": "stdio_local",
+      "package": "@modelcontextprotocol/server-everything",
+      "version": "latest",
+      "_doc": "Reference MCP server exposing tools/resources/prompts -- useful smoke test for the runtime."
+    }
+  ],
+  "skills": [
+    {
+      "name": "frontend-tool-preference",
+      "version": "1.0.0",
+      "content": "---\nname: frontend-tool-preference\ndescription: Use for frontend, UI, design-system, web app, React, Next.js, Tailwind, component, page, dashboard, landing page, or styling tasks in OmniRoute mode; prefer any available frontend MCP (shadcn, magic, 21st-dev, v0, etc.) or matching skill before manual implementation; empty MCP resources/templates and sparse dynamic_tools do not prove tool absence; use tool_search/deferred MCP discovery when available.\n---\n\n# Frontend Tool Preference\n\nWhen a task involves frontend / UI / design-system work, prefer a frontend-oriented MCP tool or skill before writing components by hand.\n\nGeneral order:\n1. Use whichever frontend MCP is available in this session for component generation, registry lookup, or design-system composition. Common ones include shadcn, magic, 21st-dev, v0, and similar; the exact set depends on the OmniRoute catalog loaded at launch.\n2. If a matching skill is listed for the same domain, treat it as a viable fallback.\n3. Fall back to manual implementation only after the MCP/skill options are unavailable or unsuitable.\n\nDiagnostics that often confuse agents:\n- Empty `list_mcp_resources` or `list_mcp_resource_templates` output does not prove that MCP tools are absent. Resources/templates and callable tools are separate MCP surfaces.\n- Skills are a separate availability signal from MCP tools. If a frontend skill is listed alongside the catalog, use it as a fallback rather than concluding the relevant MCP is missing.\n- In newer Codex Desktop builds, `session_meta.payload.dynamic_tools` can contain only app tools while external MCP tools are deferred behind `tool_search`. Treat `dynamic_tools` as debug-only, not as proof that MCP is missing.\n- If `tool_search` is available, use it to discover frontend MCPs before falling back. If discovery or callability fails, describe the concrete layer: configured, transport clean, discoverable, or callable.\n\nDo not silently skip frontend MCPs on frontend tasks. If you fall back to manual implementation, state the concrete reason briefly.\n"
+    }
+  ]
+}

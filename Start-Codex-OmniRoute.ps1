@@ -161,7 +161,10 @@ $ConfigOverlayFileName = 'codex-omniroute-config-overlay.toml'
 $KnownGoodConfigBackupFileName = 'config.before-mcp-normalize.20260501T043553.toml'
 $ApplyPatchRewriterPidFileName = 'apply_patch_rewriter.pid'
 $ApplyPatchRewriterLogFileName = 'apply_patch_rewriter.log'
-$OmniRouteFrontendSkillName = 'omniroute-frontend-tool-preference'
+$OmniRouteCatalogScriptRelPath = 'tools\omniroute-catalog.mjs'
+$OmniRouteCatalogBundleFileName = 'default-mcp-catalog.json'
+$OmniRouteCatalogCacheFileName = '.codex-omniroute-catalog-cache.json'
+$OmniRouteCatalogTomlFileName = '.codex-omniroute-catalog.toml'
 
 # ----------------------------------------------------------------------------
 # Host platform detection
@@ -1333,39 +1336,81 @@ function Build-IsolatedConfigToml {
     return $sb.ToString()
 }
 
-function Write-OmniRouteFrontendPreferenceSkill {
-    param([Parameter(Mandatory = $true)][string]$IsolatedHome)
+function Invoke-OmniRouteCatalog {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeExe,
+        [Parameter(Mandatory = $true)][string]$ScriptRoot,
+        [Parameter(Mandatory = $true)][string]$IsolatedHome
+    )
 
-    $skillDir = Join-Path $IsolatedHome ("skills\{0}" -f $OmniRouteFrontendSkillName)
-    New-Item -ItemType Directory -Path $skillDir -Force | Out-Null
-    $skillPath = Join-Path $skillDir 'SKILL.md'
-    $content = @'
----
-name: omniroute-frontend-tool-preference
-description: Use for frontend, UI, design-system, web app, React, Next.js, Tailwind, component, page, dashboard, landing page, or styling tasks in OmniRoute mode; prefer shadcn or magic MCP/skills before manual implementation; empty MCP resources/templates and sparse dynamic_tools do not prove tool absence; use tool_search/deferred MCP discovery when available.
----
+    # Loads the OmniRoute MCP/skills catalog (remote URL with fallback to a
+    # last-known-good cache and finally the in-repo default-mcp-catalog.json
+    # bundle) and turns each MCP entry into an importable [mcp_servers.<name>]
+    # block plus writes any skill entries into $IsolatedHome\skills\<name>\SKILL.md.
+    #
+    # The bundle ships with the fork so a brand-new clone gets a useful MCP
+    # baseline on first launch with zero network and zero per-user setup.
+    # Setting OMNIROUTE_CATALOG_URL turns on central updates; an absent or
+    # unreachable URL silently falls back through cache to bundle.
+    # OMNIROUTE_CATALOG_DISABLED=1 disables the whole feature.
 
-# OmniRoute Frontend Tool Preference
+    $catalogScript = Join-Path $ScriptRoot $OmniRouteCatalogScriptRelPath
+    if (-not (Test-Path -LiteralPath $catalogScript)) {
+        Write-Warning "[omniroute] catalog helper not found: $catalogScript"
+        return @()
+    }
 
-When a task involves frontend/UI work, prefer shadcn or magic when either is available as an MCP tool, a skill, or a CLI-backed fallback.
+    $bundlePath = Join-Path $ScriptRoot $OmniRouteCatalogBundleFileName
+    $cachePath  = Join-Path $ScriptRoot $OmniRouteCatalogCacheFileName
+    $tomlPath   = Join-Path $IsolatedHome $OmniRouteCatalogTomlFileName
 
-Default order:
-1. Use shadcn MCP or the shadcn skill for shadcn/ui components, registries, component docs, installs, and composition.
-2. Use magic MCP for generating or adapting UI components when it is available.
-3. Fall back to the local frontend/design skills and manual implementation only after shadcn/magic are unavailable or unsuitable for the task.
+    $argList = @(
+        $catalogScript,
+        '--toml-out',      $tomlPath,
+        '--isolated-home', $IsolatedHome,
+        '--bundle',        $bundlePath,
+        '--cache',         $cachePath,
+        '--timeout-ms',    '5000'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_CATALOG_URL)) {
+        $argList += @('--catalog-url', $env:OMNIROUTE_CATALOG_URL)
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OMNIROUTE_API_KEY)) {
+        $argList += @('--api-key', $env:OMNIROUTE_API_KEY)
+    }
+    if ($env:OMNIROUTE_CATALOG_DISABLED -eq '1') {
+        $argList += @('--disabled')
+    }
 
-Important diagnostics:
-- Empty `list_mcp_resources` or `list_mcp_resource_templates` output does not prove that MCP tools are absent. Resources/templates and callable tools are separate MCP surfaces.
-- Skills are a separate availability signal from MCP tools. If the `shadcn` skill is listed in available skills, use it at least as the shadcn fallback instead of saying shadcn is not present in the environment.
-- In newer Codex Desktop builds, `session_meta.payload.dynamic_tools` can contain only app tools while external MCP tools are deferred behind `tool_search`. Treat `dynamic_tools` as debug-only, not as proof that MCP is missing.
-- If `tool_search` is available, use it to discover shadcn/magic MCP tools before falling back. If discovery/callability fails, describe the concrete layer: configured, transport clean, discoverable, or callable.
-- If shadcn/magic are configured but not discoverable/callable in the live tool path, use the skill or CLI fallback when it fits the task and briefly say which MCP layer failed.
+    $raw = & $NodeExe @argList 2>&1
+    $exit = $LASTEXITCODE
+    $joined = ($raw | Out-String)
+    if ($exit -ne 0) {
+        Write-Warning "[omniroute] catalog helper exited with code $exit`: $($joined.Trim())"
+        return @()
+    }
 
-Do not silently skip shadcn/magic on frontend tasks. If you fall back, state the concrete reason briefly.
-'@
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($skillPath, $content, $utf8NoBom)
-    Write-Host "[omniroute] ensured frontend tool-preference skill at $skillPath"
+    try {
+        $status = $joined | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Warning "[omniroute] catalog helper returned non-JSON: $($joined.Trim())"
+        return @()
+    }
+
+    $source         = if ($status.source) { [string]$status.source } else { 'unknown' }
+    $catalogVersion = if ($status.catalog_version) { [string]$status.catalog_version } else { '' }
+    $mcpCount       = [int]$status.mcp_count
+    $skillCount     = [int]$status.skill_count
+    Write-Host ("[omniroute] catalog source={0} version={1} mcp={2} skills={3}" -f $source, $catalogVersion, $mcpCount, $skillCount)
+    if ($status.warnings) {
+        foreach ($w in @($status.warnings)) {
+            Write-Warning "[omniroute] catalog: $w"
+        }
+    }
+
+    if ($mcpCount -le 0) { return @() }
+    if (-not (Test-Path -LiteralPath $tomlPath)) { return @() }
+    return @(Get-ImportableConfigBlocks -ConfigPath $tomlPath -SourceLabel 'omniroute catalog')
 }
 
 function Seed-IsolatedCodexHome {
@@ -1392,7 +1437,23 @@ function Seed-IsolatedCodexHome {
     if ($OverlayConfigPath) {
         $overlayBlocks = @(Get-ImportableConfigBlocks -ConfigPath $OverlayConfigPath -SourceLabel 'overlay config')
     }
-    $importedBlocks = Merge-ConfigBlocks -Sources @($previousBlocks, $officialBlocks, $repairBlocks, $overlayBlocks)
+
+    # The catalog helper writes skills directly into $IsolatedHome\skills\;
+    # make sure the directory exists before we invoke it. The block below
+    # also creates it for state seeding, so this is idempotent.
+    New-Item -ItemType Directory -Path $IsolatedHome -Force | Out-Null
+
+    $catalogBlocks = @(Invoke-OmniRouteCatalog `
+        -NodeExe $NodeExe `
+        -ScriptRoot $ScriptRoot `
+        -IsolatedHome $IsolatedHome)
+
+    # Merge order is significant: later sources override earlier ones on
+    # name collision. Previous launches sit at the bottom so stale catalog
+    # entries get refreshed; the catalog supplies the centrally-managed
+    # defaults; the user's real config overrides catalog defaults; the
+    # known-good backup and overlay win last.
+    $importedBlocks = Merge-ConfigBlocks -Sources @($previousBlocks, $catalogBlocks, $officialBlocks, $repairBlocks, $overlayBlocks)
     $importedBlocks = Normalize-ImportedConfigBlocks -Blocks $importedBlocks -ScriptRoot $ScriptRoot -NodeExe $NodeExe
 
     # Keep the isolated home persistent. Codex Desktop stores visible chat
@@ -1445,7 +1506,6 @@ function Seed-IsolatedCodexHome {
         $marketCount = @($importedBlocks | Where-Object { $_.Name.Trim().ToLowerInvariant().StartsWith('marketplaces.', [System.StringComparison]::Ordinal) }).Count
         Write-Host ("[omniroute] imported config sections: marketplaces={0}, plugins={1}, mcp_sections={2}, total={3}" -f $marketCount, $pluginCount, $mcpCount, $importedBlocks.Count)
     }
-    Write-OmniRouteFrontendPreferenceSkill -IsolatedHome $IsolatedHome
 
     # Write a stamp file that records the isolated dir contents at seed
     # time. The bridge reads this on /healthz to compute
