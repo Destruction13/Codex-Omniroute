@@ -17,6 +17,7 @@ bridge.log
 
 # Local provider config (real secrets live here)
 omniroute-provider.json
+codex-omniroute-config-overlay.toml
 .env
 .env.*
 !.env.example
