@@ -6,14 +6,14 @@
     Launches the *unmodified* Microsoft Store Codex app with NO
     OmniRoute environment overrides, NO bridge, and NO helper processes.
 
-    Under the Variant-3 architecture the OmniRoute launcher does NOT
-    modify the user's real ~/.codex directory (no backup, no managed
-    block in config.toml, no sentinel auth.json). All OmniRoute state
-    lives in a side directory (".codex-omniroute-home" next to the
-    OmniRoute launcher), which Start-Codex-OmniRoute.ps1 -Restore
-    wipes. As a result there is NO restore-of-real-config to do here:
-    this launcher just stops a running managed bridge and activates
-    Codex.
+    Under the Variant-3 architecture the OmniRoute launcher does not
+    write managed blocks or auth sentinels into the user's real ~/.codex.
+    All OmniRoute state lives in a side directory
+    (".codex-omniroute-home" next to the OmniRoute launcher), and normal
+    mode switches preserve that directory so OmniRoute history survives.
+    This launcher just stops OmniRoute helper processes, clears stale
+    CODEX_HOME and the temporary taskkill-shim PATH prefix, performs
+    legacy/repair cleanup if needed, and activates Codex.
 
     For users upgrading from earlier versions (PR #3 or PR #2) we DO
     still sweep up any legacy artifacts those launchers left in the
@@ -34,9 +34,11 @@
 .NOTES
     - Resolves the Store-installed package dynamically via
       Get-AppxPackage OpenAI.Codex; the AppUserModelID is not hardcoded.
-    - Inherits the user's environment unchanged. No CODEX_HOME,
-      OMNIROUTE_*, CODEX_BRIDGE_*, or CODEX_ELECTRON_USER_DATA_PATH is
-      set by this script.
+    - Sets no OMNIROUTE_*, CODEX_BRIDGE_*, or
+      CODEX_ELECTRON_USER_DATA_PATH values. The only user-environment
+      mutations it may perform are clearing a stale CODEX_HOME that
+      points at this repo's isolated OmniRoute home and clearing a stale
+      taskkill-shim PATH prefix from the same isolated home.
     - Exits non-zero if the official package is not installed.
 #>
 
@@ -60,6 +62,85 @@ function Test-WindowsHost {
     if ($winVar) { return [bool]$winVar.Value }
     if ($env:OS -eq 'Windows_NT') { return $true }
     return $false
+}
+
+function Test-SameEnvironmentValue {
+    param(
+        [AllowNull()][string]$Left,
+        [AllowNull()][string]$Right
+    )
+    return [string]::Equals($Left, $Right, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Publish-UserEnvironmentChange {
+    if (-not (Test-WindowsHost)) { return }
+
+    if (-not ('CodexOfficialEnvBroadcaster' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CodexOfficialEnvBroadcaster {
+    private static readonly IntPtr HWND_BROADCAST = new IntPtr(0xffff);
+    private const uint WM_SETTINGCHANGE = 0x001A;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint Msg,
+        UIntPtr wParam,
+        string lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out UIntPtr lpdwResult);
+
+    public static void BroadcastEnvironmentChange() {
+        UIntPtr result;
+        SendMessageTimeout(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            UIntPtr.Zero,
+            "Environment",
+            SMTO_ABORTIFHUNG,
+            5000,
+            out result);
+    }
+}
+'@
+    }
+
+    try { [CodexOfficialEnvBroadcaster]::BroadcastEnvironmentChange() } catch {}
+}
+
+function Clear-StaleUserCodexHomeOverride {
+    param([Parameter(Mandatory = $true)][string]$IsolatedHome)
+    if (-not (Test-WindowsHost)) { return }
+
+    $currentUserCodexHome = [System.Environment]::GetEnvironmentVariable('CODEX_HOME', 'User')
+    if (Test-SameEnvironmentValue $currentUserCodexHome $IsolatedHome) {
+        [System.Environment]::SetEnvironmentVariable('CODEX_HOME', $null, 'User')
+        Publish-UserEnvironmentChange
+        Write-Host "[official] cleared stale user-scope CODEX_HOME override"
+    }
+}
+
+function Clear-StaleTaskkillShimPathOverride {
+    param([Parameter(Mandatory = $true)][string]$ShimDir)
+    if (-not (Test-WindowsHost)) { return }
+    if ([string]::IsNullOrWhiteSpace($ShimDir)) { return }
+
+    $currentUserPath = [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+    if ([string]::IsNullOrWhiteSpace($currentUserPath)) { return }
+    $parts = @($currentUserPath -split ';')
+    if ($parts.Count -eq 0) { return }
+    if (-not (Test-SameEnvironmentValue $parts[0] $ShimDir)) { return }
+    $rest = @($parts | Select-Object -Skip 1)
+    $newPath = ($rest -join ';')
+    if ([string]::IsNullOrWhiteSpace($newPath)) { $newPath = $null }
+    [System.Environment]::SetEnvironmentVariable('PATH', $newPath, 'User')
+    Publish-UserEnvironmentChange
+    Write-Host "[official] cleared stale user-scope PATH taskkill shim prefix"
 }
 
 function Resolve-CodexAppx {
@@ -296,6 +377,44 @@ function Stop-ManagedBridge {
     Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
 }
 
+function Stop-ManagedApplyPatchRewriter {
+    param([string]$PidPath)
+    if (-not (Test-Path -LiteralPath $PidPath)) { return }
+    try {
+        $pidText = (Get-Content -LiteralPath $PidPath -Raw).Trim()
+    } catch { return }
+    if (-not ($pidText -match '^\d+$')) {
+        Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $existingPid = [int]$pidText
+    try {
+        $proc = Get-Process -Id $existingPid -ErrorAction Stop
+        if ($proc.ProcessName -match '^node') {
+            Stop-Process -Id $existingPid -Force -ErrorAction SilentlyContinue
+            Write-Host "[official] stopped OmniRoute apply_patch rewriter (pid=$existingPid)"
+        }
+    } catch { }
+    Remove-Item -LiteralPath $PidPath -Force -ErrorAction SilentlyContinue
+}
+
+function Invoke-ConfigRepairIfNeeded {
+    param(
+        [Parameter(Mandatory = $true)][string]$CodexHome,
+        [Parameter(Mandatory = $true)][string]$ScriptDir
+    )
+    $repairTool = Join-Path $ScriptDir 'tools\Repair-CodexConfig.ps1'
+    if (-not (Test-Path -LiteralPath $repairTool)) { return }
+    try {
+        & $repairTool -CodexHome $CodexHome -Quiet
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "[official] config repair helper exited with code $LASTEXITCODE"
+        }
+    } catch {
+        Write-Warning "[official] config repair helper failed: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-AutoRestore {
     # USERPROFILE is Windows-only; on non-Windows hosts (verifier smoke)
     # fall back to $HOME so this launcher matches the layout
@@ -314,12 +433,19 @@ function Invoke-AutoRestore {
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Split-Path -Parent $MyInvocation.MyCommand.Path) }
     if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
     $bridgePidPath = Join-Path $scriptDir 'bridge.pid'
+    $applyPatchRewriterPidPath = Join-Path $scriptDir 'apply_patch_rewriter.pid'
+    $isolatedHome = Join-Path $scriptDir '.codex-omniroute-home'
+    $taskkillShimDir = Join-Path $isolatedHome 'bin'
 
     Stop-ManagedBridge -PidPath $bridgePidPath
+    Stop-ManagedApplyPatchRewriter -PidPath $applyPatchRewriterPidPath
+    Clear-StaleUserCodexHomeOverride -IsolatedHome $isolatedHome
+    Clear-StaleTaskkillShimPathOverride -ShimDir $taskkillShimDir
 
     # Legacy cleanup: only acts if PR-#2 / PR-#3 artifacts are present.
     Restore-LegacyConfigToml -ConfigPath $configPath -BackupPath $backupPath
     Restore-LegacyAuthJson   -AuthPath   $authPath   -BackupPath $authBackupPath
+    Invoke-ConfigRepairIfNeeded -CodexHome $codexHome -ScriptDir $scriptDir
 }
 
 if (-not $NoAutoRestore) {

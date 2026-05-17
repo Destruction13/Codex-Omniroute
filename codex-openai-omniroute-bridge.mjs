@@ -80,20 +80,25 @@ const OFFICIAL_UPSTREAM = stripTrailingSlash(
 // directory next to the launcher. The launcher seeds it on every boot:
 // auth.json comes from the user's real ~/.codex/auth.json (so Codex
 // Desktop stays signed in), models_cache.json is copied if present, and
-// config.toml is written from scratch. The bridge reads auth.json from
-// here for the official-passthrough fallback, and models_cache.json for
-// /v1/models. No CODEX_OFFICIAL_AUTH_PATH redirection: Codex Desktop
-// sends the real OAuth bearer on its requests, so we forward it as-is.
+// config.toml is regenerated with the managed OmniRoute provider plus
+// selected MCP/plugin/marketplace/project sections imported from the real
+// user config or overlay. The bridge reads auth.json from here for the
+// official-passthrough fallback, and models_cache.json for /v1/models. No
+// CODEX_OFFICIAL_AUTH_PATH redirection: Codex Desktop sends the real OAuth
+// bearer on its requests, so we forward it as-is.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
 const CODEX_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
 const CODEX_SEED_STAMP_PATH = path.join(CODEX_HOME, ".omniroute-seed.json");
+const CODEX_CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
+const LAST_REASONING_DIAGNOSTIC_PATH = path.join(CODEX_HOME, ".omniroute-last-reasoning.json");
 
 const OMNIROUTE_BASE_URL_ENV = stripTrailingSlash(process.env.OMNIROUTE_BASE_URL || "");
 const OMNIROUTE_API_KEY_ENV = process.env.OMNIROUTE_API_KEY || "";
 const OMNIROUTE_MODEL_PREFIX = process.env.OMNIROUTE_MODEL_PREFIX ?? "cx/";
 const OMNIROUTE_PIN_55 = process.env.OMNIROUTE_PIN_55 === "1";
 const OMNIROUTE_55_CONNECTION_ID = process.env.OMNIROUTE_55_CONNECTION_ID || "";
+const OMNIROUTE_MODEL_ALIASES = process.env.OMNIROUTE_MODEL_ALIASES || "";
 
 const PROVIDER_JSON_PATH = path.resolve(
   process.env.OMNIROUTE_PROVIDER_JSON || "./omniroute-provider.json",
@@ -191,7 +196,7 @@ function redactReplacer(key, value) {
 // Provider resolution (OmniRoute)
 // ----------------------------------------------------------------------------
 
-let PROVIDER = null; // { base_url, api_key, model_prefix, default_model, headers, gpt55_pin }
+let PROVIDER = null; // { base_url, api_key, model_prefix, model_aliases, default_model, headers, gpt55_pin }
 
 // Counter incremented every time handleOmniRoutePost forwards a request
 // to OmniRoute (main reasoning). Exposed on /healthz so the operator can
@@ -199,6 +204,7 @@ let PROVIDER = null; // { base_url, api_key, model_prefix, default_model, header
 // through the bridge instead of bypassing it. If this stays at 0 after
 // the user has sent a chat message, the bridge was bypassed.
 let MAIN_REASONING_HITS = 0;
+let LAST_REASONING_DIAGNOSTIC = null;
 
 async function resolveProvider() {
   if (PROVIDER) return PROVIDER;
@@ -209,6 +215,7 @@ async function resolveProvider() {
       base_url: OMNIROUTE_BASE_URL_ENV,
       api_key: OMNIROUTE_API_KEY_ENV,
       model_prefix: OMNIROUTE_MODEL_PREFIX,
+      model_aliases: parseModelAliases(OMNIROUTE_MODEL_ALIASES),
       default_model: "gpt-5.4",
       headers: {},
       gpt55_pin: {
@@ -228,6 +235,7 @@ async function resolveProvider() {
       base_url: stripTrailingSlash(fromJson.base_url),
       api_key: fromJson.api_key,
       model_prefix: fromJson.model_prefix ?? OMNIROUTE_MODEL_PREFIX,
+      model_aliases: parseModelAliases(fromJson.model_aliases),
       default_model: fromJson.default_model || "gpt-5.4",
       headers: fromJson.headers || {},
       gpt55_pin: fromJson.gpt55_pin || {
@@ -254,6 +262,7 @@ async function resolveProvider() {
             base_url: stripTrailingSlash(baseUrl),
             api_key: apiKey,
             model_prefix: entry.model_prefix ?? OMNIROUTE_MODEL_PREFIX,
+            model_aliases: parseModelAliases(entry.model_aliases),
             default_model: entry.default_model || "gpt-5.4",
             headers: entry.headers || {},
             gpt55_pin: entry.gpt55_pin || {
@@ -414,13 +423,54 @@ function maybeBase64DecodeBody(buf, headers) {
 // Model normalization
 // ----------------------------------------------------------------------------
 
+function parseModelAliases(value) {
+  if (!value) return {};
+  let parsed = value;
+  if (typeof value === "string") {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      log("warn", "ignoring invalid OMNIROUTE_MODEL_ALIASES/model_aliases JSON");
+      return {};
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const aliases = {};
+  for (const [from, to] of Object.entries(parsed)) {
+    if (typeof from === "string" && typeof to === "string" && from && to) {
+      aliases[from] = to;
+    }
+  }
+  return aliases;
+}
+
+function stripModelPrefixForAlias(model, provider) {
+  if (!model || typeof model !== "string") return model;
+  const prefix = provider.model_prefix || "";
+  let stripped = model.replace(/^openai\//, "");
+  if (prefix && stripped.startsWith(prefix)) stripped = stripped.slice(prefix.length);
+  return stripped;
+}
+
+function normalizeAliasTargetForOmniRoute(target, provider) {
+  if (!target || typeof target !== "string") return target;
+  const prefix = provider.model_prefix || "";
+  const stripped = target.replace(/^openai\//, "");
+  if (!prefix || stripped.startsWith(prefix) || /^[a-z][\w.-]*\//i.test(stripped)) {
+    return stripped;
+  }
+  return `${prefix}${stripped}`;
+}
+
 function normalizeModelForOmniRoute(model, provider) {
   if (!model || typeof model !== "string") return model;
   const prefix = provider.model_prefix || "";
+  const aliases = provider.model_aliases || {};
+  const stripped = stripModelPrefixForAlias(model, provider);
+  const aliasTarget = aliases[model] || aliases[stripped];
+  if (aliasTarget) return normalizeAliasTargetForOmniRoute(aliasTarget, provider);
   if (!prefix) return model;
   if (model.startsWith(prefix)) return model;
-  // Strip a leading "openai/" if present so we don't double-prefix.
-  const stripped = model.replace(/^openai\//, "");
   return `${prefix}${stripped}`;
 }
 
@@ -451,6 +501,225 @@ function normalizeMainRequestBody(buf, provider) {
     parsed = applyGpt55Pin(parsed, provider);
   }
   return Buffer.from(JSON.stringify(parsed), "utf8");
+}
+
+// ----------------------------------------------------------------------------
+// Live model-request tool diagnostics
+// ----------------------------------------------------------------------------
+
+function normalizeToolSignal(value) {
+  if (value == null) return "";
+  return String(value).toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function stripTomlQuotes(value) {
+  const s = String(value || "").trim();
+  if (s.length >= 2 && s.startsWith('"') && s.endsWith('"')) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return s.slice(1, -1);
+    }
+  }
+  if (s.length >= 2 && s.startsWith("'") && s.endsWith("'")) return s.slice(1, -1);
+  return s;
+}
+
+async function readConfiguredMcpServerNames() {
+  let text = "";
+  try {
+    text = await fs.readFile(CODEX_CONFIG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+
+  const names = new Set();
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*\[(.+?)\]\s*(?:#.*)?$/);
+    if (!m) continue;
+    const section = m[1].trim();
+    if (!section.toLowerCase().startsWith("mcp_servers.")) continue;
+    if (section.toLowerCase().endsWith(".env")) continue;
+    const name = stripTomlQuotes(section.slice("mcp_servers.".length));
+    if (name) names.add(name);
+  }
+  return Array.from(names).sort((a, b) => a.localeCompare(b));
+}
+
+function pickToolString(tool, paths) {
+  for (const pathParts of paths) {
+    let cur = tool;
+    for (const part of pathParts) {
+      if (cur == null || typeof cur !== "object" || !(part in cur)) {
+        cur = null;
+        break;
+      }
+      cur = cur[part];
+    }
+    if (typeof cur === "string" && cur.trim()) return cur.trim();
+  }
+  return null;
+}
+
+function summarizeOneTool(tool) {
+  if (tool == null || typeof tool !== "object") {
+    return { type: typeof tool, name: String(tool).slice(0, 120) };
+  }
+  return {
+    type: pickToolString(tool, [["type"]]),
+    name: pickToolString(tool, [["name"], ["function", "name"]]),
+    namespace: pickToolString(tool, [["namespace"]]),
+    server_label: pickToolString(tool, [["server_label"], ["serverLabel"]]),
+    server_name: pickToolString(tool, [["server_name"], ["serverName"], ["mcp_server"], ["mcpServer"]]),
+    connector_id: pickToolString(tool, [["connector_id"], ["connectorId"]]),
+  };
+}
+
+function compactDefinedObject(obj) {
+  const out = {};
+  for (const [key, value] of Object.entries(obj || {})) {
+    if (value != null && value !== "") out[key] = value;
+  }
+  return out;
+}
+
+function toolLooksLikeToolSearch(tool, summary) {
+  const haystack = normalizeToolSignal([
+    summary?.type,
+    summary?.name,
+    summary?.namespace,
+    summary?.server_label,
+    summary?.server_name,
+  ].filter(Boolean).join(" "));
+  if (haystack.includes("toolsearch")) return true;
+  try {
+    return normalizeToolSignal(JSON.stringify(tool, redactReplacer)).includes("toolsearch");
+  } catch {
+    return false;
+  }
+}
+
+function toolHasExplicitMcpAttachment(summary) {
+  const type = normalizeToolSignal(summary?.type);
+  if (type === "mcp" || type === "mcptool" || type === "mcpserver") return true;
+  return Boolean(summary?.server_label || summary?.server_name);
+}
+
+function explicitConfiguredMcpServerMatches(summary, serverSignals) {
+  const matches = [];
+  for (const value of [summary?.server_label, summary?.server_name]) {
+    const signal = normalizeToolSignal(value);
+    if (signal && serverSignals.has(signal)) matches.push(serverSignals.get(signal));
+  }
+  return matches;
+}
+
+function toolLooksLikeMcpHeuristic(tool, summary) {
+  if (toolHasExplicitMcpAttachment(summary)) return true;
+  const haystack = normalizeToolSignal([
+    summary?.type,
+    summary?.name,
+    summary?.namespace,
+    summary?.connector_id,
+  ].filter(Boolean).join(" "));
+  if (haystack.includes("mcp")) return true;
+  try {
+    return normalizeToolSignal(JSON.stringify(tool, redactReplacer)).includes("mcp");
+  } catch {
+    return false;
+  }
+}
+
+async function summarizeReasoningRequestTools(bodyBuf, suffix, inboundHeaders = {}) {
+  const configuredMcpServers = await readConfiguredMcpServerNames();
+  const serverSignals = new Map(
+    configuredMcpServers
+      .map((name) => [normalizeToolSignal(name), name])
+      .filter(([signal]) => signal),
+  );
+
+  let parsed = null;
+  let parseError = null;
+  try {
+    parsed = JSON.parse(bodyBuf.toString("utf8"));
+  } catch (err) {
+    parseError = err?.message || String(err);
+  }
+
+  const tools = Array.isArray(parsed?.tools) ? parsed.tools : [];
+  const summarizedTools = tools.map((tool) => compactDefinedObject(summarizeOneTool(tool)));
+  const directMatchedServers = new Set();
+  const heuristicMatchedServers = new Set();
+  let hasToolSearch = false;
+  let directMcpAttachmentCount = 0;
+  let heuristicMcpShapedCount = 0;
+
+  for (let i = 0; i < tools.length; i += 1) {
+    const tool = tools[i];
+    const summary = summarizedTools[i] || {};
+    if (toolHasExplicitMcpAttachment(summary)) {
+      directMcpAttachmentCount += 1;
+      for (const name of explicitConfiguredMcpServerMatches(summary, serverSignals)) {
+        directMatchedServers.add(name);
+      }
+    }
+    const searchable = normalizeToolSignal([
+      JSON.stringify(summary),
+      safeStringify(tool),
+    ].join(" "));
+    for (const [signal, name] of serverSignals.entries()) {
+      if (searchable.includes(signal)) heuristicMatchedServers.add(name);
+    }
+    if (toolLooksLikeToolSearch(tool, summary)) hasToolSearch = true;
+    if (toolLooksLikeMcpHeuristic(tool, summary)) heuristicMcpShapedCount += 1;
+  }
+
+  const diagnostic = {
+    recorded_at_utc: new Date().toISOString(),
+    path: suffix,
+    model: typeof parsed?.model === "string" ? parsed.model : null,
+    parse_error: parseError,
+    inbound_headers: {
+      has_authorization: Boolean(inboundHeaders.authorization),
+      user_agent: inboundHeaders["user-agent"] || null,
+      x_codex_headers: Object.keys(inboundHeaders)
+        .filter((name) => name.toLowerCase().startsWith("x-codex"))
+        .sort(),
+    },
+    config_path: CODEX_CONFIG_PATH,
+    configured_mcp_servers: configuredMcpServers,
+    matched_configured_mcp_servers: Array.from(directMatchedServers).sort((a, b) => a.localeCompare(b)),
+    direct_configured_mcp_servers: Array.from(directMatchedServers).sort((a, b) => a.localeCompare(b)),
+    has_configured_mcp_tools: directMatchedServers.size > 0,
+    has_direct_configured_mcp_tools: directMatchedServers.size > 0,
+    has_any_mcp_shaped_tool: directMcpAttachmentCount > 0,
+    mcp_shaped_tool_count: directMcpAttachmentCount,
+    direct_mcp_attachment_count: directMcpAttachmentCount,
+    heuristic_matched_configured_mcp_servers: Array.from(heuristicMatchedServers).sort((a, b) => a.localeCompare(b)),
+    has_any_mcp_shaped_tool_heuristic: heuristicMcpShapedCount > 0,
+    mcp_shaped_tool_count_heuristic: heuristicMcpShapedCount,
+    mcp_heuristics_are_authoritative: false,
+    has_tool_search: hasToolSearch,
+    tools_total: tools.length,
+    tool_types: Array.from(new Set(summarizedTools.map((t) => t.type).filter(Boolean))).sort(),
+    tool_names: summarizedTools
+      .map((t) => t.name || t.server_label || t.server_name || t.namespace)
+      .filter(Boolean)
+      .slice(0, 50),
+    first_tools: summarizedTools.slice(0, 20),
+  };
+
+  LAST_REASONING_DIAGNOSTIC = diagnostic;
+  try {
+    await fs.writeFile(
+      LAST_REASONING_DIAGNOSTIC_PATH,
+      JSON.stringify(diagnostic, null, 2),
+      "utf8",
+    );
+  } catch (err) {
+    log("warn", "failed to write reasoning tool diagnostic", err?.message);
+  }
+  return diagnostic;
 }
 
 // ----------------------------------------------------------------------------
@@ -552,6 +821,8 @@ async function handleHealth(req, res) {
   const provider = await resolveProvider();
   const auth = await loadOfficialAuth();
   const homeStatus = await inspectIsolatedCodexHome();
+  const lastReasoningRequest =
+    LAST_REASONING_DIAGNOSTIC || (await tryReadJson(LAST_REASONING_DIAGNOSTIC_PATH));
 
   res.statusCode = 200;
   res.setHeader("content-type", "application/json");
@@ -571,6 +842,7 @@ async function handleHealth(req, res) {
         source: provider?.source || null,
         base_url: provider?.base_url || null,
         model_prefix: provider?.model_prefix || null,
+        model_aliases: provider?.model_aliases || {},
         gpt55_pin_enabled: Boolean(provider?.gpt55_pin?.enabled && provider?.gpt55_pin?.connection_id),
       },
       official_auth_path: CODEX_AUTH_PATH,
@@ -584,6 +856,8 @@ async function handleHealth(req, res) {
       // boot; if it stays at 0 after the user sends a chat message,
       // Desktop ignored CODEX_HOME and bypassed the bridge.
       main_reasoning_hits: MAIN_REASONING_HITS,
+      last_reasoning_request_path: LAST_REASONING_DIAGNOSTIC_PATH,
+      last_reasoning_request: lastReasoningRequest,
       desktop_codex_home_honored: homeStatus.honored,
       isolated_home: {
         seed_stamp_path: CODEX_SEED_STAMP_PATH,
@@ -647,6 +921,12 @@ async function handleOmniRoutePost(req, res, suffix) {
     return;
   }
   const bodyBuf = normalizeMainRequestBody(raw, provider);
+  let toolDiagnostic = null;
+  try {
+    toolDiagnostic = await summarizeReasoningRequestTools(bodyBuf, suffix, req.headers);
+  } catch (err) {
+    log("warn", "failed to summarize reasoning request tools", err?.message);
+  }
   const target = new URL(provider.base_url + suffix);
   const headers = buildForwardHeaders(req.headers, "omniroute", provider, null);
   headers["content-type"] = "application/json";
@@ -656,7 +936,24 @@ async function handleOmniRoutePost(req, res, suffix) {
   // upstream returns 502, the fact that the bridge handled the request
   // is enough to prove CODEX_HOME isolation is working.
   MAIN_REASONING_HITS += 1;
-  log("info", "omniroute ->", target.href, `bytes=${bodyBuf.length}`);
+  if (toolDiagnostic) {
+    const matched = toolDiagnostic.direct_configured_mcp_servers.join(",") || "none";
+    const heuristicMatched = toolDiagnostic.heuristic_matched_configured_mcp_servers.join(",") || "none";
+    log(
+      "info",
+      "omniroute ->",
+      target.href,
+      `bytes=${bodyBuf.length}`,
+      `tools=${toolDiagnostic.tools_total}`,
+      `mcp_direct=${matched}`,
+      `mcp_direct_count=${toolDiagnostic.direct_mcp_attachment_count}`,
+      `mcp_heuristic=${heuristicMatched}`,
+      `mcp_heuristic_count=${toolDiagnostic.mcp_shaped_tool_count_heuristic}`,
+      `tool_search=${toolDiagnostic.has_tool_search}`,
+    );
+  } else {
+    log("info", "omniroute ->", target.href, `bytes=${bodyBuf.length}`);
+  }
   forwardOutbound({ target, method: "POST", headers, bodyBuf, clientRes: res, isStreaming: true });
 }
 
@@ -774,7 +1071,7 @@ async function pathExists(p) {
 async function tryReadJson(p) {
   try {
     const buf = await fs.readFile(p, "utf8");
-    return JSON.parse(buf);
+    return JSON.parse(buf.replace(/^\uFEFF/, ""));
   } catch {
     return null;
   }
