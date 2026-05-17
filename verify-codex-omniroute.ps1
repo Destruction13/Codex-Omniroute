@@ -1,44 +1,52 @@
 <#
 .SYNOPSIS
-    Verifies the Codex OmniRoute architecture invariants.
+    Verifies the Codex OmniRoute Variant-3 invariants.
 
 .DESCRIPTION
     Runs a bounded OmniRoute launch (bridge only, no Codex GUI) and checks
-    the small set of invariants that defines the simplified architecture:
+    the small set of invariants that defines the Variant-3 architecture:
 
       1. Start-Codex-OmniRoute.ps1 -NoCodex succeeds.
       2. Bridge /healthz responds with ok=true.
       3. The managed bridge PID file exists and points to a live node process.
-      4. The user's real ~/.codex/config.toml contains the OmniRoute managed
-         block with model_provider = "omniroute_bridge" and a fresh
-         base_url pointing at the bridge port.
-      5. A backup file ~/.codex/config.toml.codex-omniroute-backup exists
-         (so -Restore is reversible).
-      6. The user's real ~/.codex/auth.json contains the OmniRoute managed
-         API-key sentinel (so Codex Desktop is in API-key auth mode and
-         actually uses the bridge for main reasoning instead of
-         bypassing it via the ChatGPT OAuth session).
-      7. A backup file ~/.codex/auth.json.codex-omniroute-backup exists
-         when the user had a pre-existing auth.json.
-      8. /healthz's managed_auth diagnostic reports the live auth.json
-         is the sentinel AND has no OAuth tokens left over (the explicit
-         "Desktop won't bypass us" check that motivates this whole file).
-      9. Start-Codex-Official.ps1 -DryRun -NoAutoRestore resolves the Codex
-         package without trying to modify config or env.
-     10. The bridge responds to GET /v1/models with the local models cache
-         (or with a documented "models_cache_missing" error when the cache
-         file is absent).
-     11. The dictation endpoint POST /transcribe is reachable (the bridge
+      4. The isolated CODEX_HOME directory (".codex-omniroute-home" next to
+         the launcher) exists and contains the three seeded files:
+            - config.toml with model_provider = "omniroute_bridge" and a
+              base_url pointing at the active bridge port.
+            - auth.json with the user's real OAuth tokens (copy of their
+              real ~/.codex/auth.json).
+            - .omniroute-seed.json stamp file.
+         models_cache.json is optional (present only if the user already
+         had one in their real ~/.codex).
+      5. The isolated CODEX_HOME does NOT contain state_5.sqlite at seed
+         time. This is what forces Codex Desktop to read the fresh
+         config.toml on the first new-thread create.
+      6. The bridge's /healthz exposes:
+            - main_reasoning_hits counter (must be 0 at boot, will rise
+              as Codex Desktop sends real chat traffic).
+            - desktop_codex_home_honored flag (will flip to true once
+              Desktop touches the isolated dir).
+            - isolated_home.seed_stamp_present = true.
+            - official_auth_present = true (we copied real OAuth tokens
+              into the isolated home).
+      7. The user's real ~/.codex/config.toml has NO managed block (the
+         launcher does not mutate the real config under Variant 3).
+      8. The user's real ~/.codex/auth.json is NOT the API-key sentinel
+         from PR #3 (we copy it, we don't overwrite it).
+      9. The user's real ~/.codex has no *.codex-omniroute-backup files
+         (legacy artifacts from PR #2 / PR #3; the launcher's legacy
+         cleanup pass removes any it finds).
+     10. Start-Codex-Official.ps1 -DryRun -NoAutoRestore resolves the
+         Codex package without setting any OmniRoute env or referencing
+         the bridge module.
+     11. The bridge responds to GET /v1/models with the local models cache
+         (or with a documented "models_cache_missing" error when the
+         cache file is absent).
+     12. The dictation endpoint POST /transcribe is reachable (the bridge
          does not 404 it).
-     12. Start-Codex-OmniRoute.ps1 -Restore stops the bridge and either
-         restores the original config.toml + auth.json byte-for-byte from
-         backup or removes the managed-only files when there was no
-         original.
-
-    The old isolated-runtime invariants (payload copy, apply_patch
-    rewriter, AppX alias junction, git shim absence, profile sanitization,
-    user-local Codex bin fallback) have been retired alongside the
-    isolation logic itself.
+     13. Start-Codex-OmniRoute.ps1 -Restore stops the bridge, removes the
+         isolated CODEX_HOME, and leaves the user's real ~/.codex
+         untouched.
 
     Optional live smokes (only run with -Live):
        - POST /v1/responses
@@ -104,34 +112,54 @@ if (-not $psHost) {
 }
 
 $scriptRoot     = $PSScriptRoot
+if (-not $scriptRoot) { $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $omniLauncher   = Join-Path $scriptRoot 'Start-Codex-OmniRoute.ps1'
 $offLauncher    = Join-Path $scriptRoot 'Start-Codex-Official.ps1'
 $bridgePid      = Join-Path $scriptRoot 'bridge.pid'
 $bridgeLog      = Join-Path $scriptRoot 'bridge.log'
+$isolatedHome   = Join-Path $scriptRoot '.codex-omniroute-home'
+
 # USERPROFILE is Windows-only; on Linux / macOS the verifier still runs as
 # a smoke. Fall back to $HOME so the bridge / launcher (which themselves
 # use os.homedir() / $env:USERPROFILE with the same fallback) see the same
 # directory the verifier inspects.
 $codexHomeRoot  = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
-$codexHome      = Join-Path $codexHomeRoot '.codex'
-$configPath     = Join-Path $codexHome 'config.toml'
-$backupPath     = Join-Path $codexHome 'config.toml.codex-omniroute-backup'
-$authPath       = Join-Path $codexHome 'auth.json'
-$authBackupPath = Join-Path $codexHome 'auth.json.codex-omniroute-backup'
+$realCodexHome  = Join-Path $codexHomeRoot '.codex'
+$realConfigPath = Join-Path $realCodexHome 'config.toml'
+$realAuthPath   = Join-Path $realCodexHome 'auth.json'
 
-$ManagedBlockBegin = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
-$ManagedBlockEnd   = '# <<< codex-omniroute-managed'
-$ManagedAuthSentinelApiKey = 'sk-omniroute-managed'
+$LegacyManagedBlockBegin       = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'
+$LegacyManagedAuthSentinelKey  = 'sk-omniroute-managed'
+$LegacyConfigBackup            = Join-Path $realCodexHome 'config.toml.codex-omniroute-backup'
+$LegacyAuthBackup              = Join-Path $realCodexHome 'auth.json.codex-omniroute-backup'
 
-# Snapshot whether the user had a real auth.json BEFORE the launcher ran.
-# The backup file is the only way the verifier can distinguish:
-#   - "no original auth.json existed" (backup is empty, expected after restore: no live file)
-# from:
-#   - "user had a real auth.json" (backup has content, expected after restore: file matches backup).
-# We have to read this *before* invoking the launcher because the launcher
-# is what creates the backup.
-$authPreExisted = Test-Path -LiteralPath $authPath
-$authPreContent = if ($authPreExisted) { Get-Content -LiteralPath $authPath -Raw } else { $null }
+# Snapshot the real ~/.codex BEFORE the launcher runs so we can prove
+# Variant 3 didn't touch it. Both content snapshots may be $null when
+# the user has no real config / auth yet; we accept that as a degenerate
+# fresh-install case.
+#
+# Important nuance: if the user is upgrading from PR-#2/#3, the legacy
+# cleanup pass inside the launcher WILL rewrite ~/.codex/config.toml to
+# strip the managed block (and remove the sentinel auth.json). That is
+# expected behavior, not a regression. The verifier distinguishes
+# between "launcher modified clean real config" (regression) and
+# "launcher stripped a stale managed block" (expected) by inspecting
+# pre-launch content for the legacy block markers.
+$realConfigPreExisted  = Test-Path -LiteralPath $realConfigPath
+$realConfigPreContent  = if ($realConfigPreExisted) { Get-Content -LiteralPath $realConfigPath -Raw } else { $null }
+$realConfigHadLegacy   = ($null -ne $realConfigPreContent -and $realConfigPreContent.Contains($LegacyManagedBlockBegin))
+$realAuthPreExisted    = Test-Path -LiteralPath $realAuthPath
+$realAuthPreContent    = if ($realAuthPreExisted) { Get-Content -LiteralPath $realAuthPath -Raw } else { $null }
+$realAuthHadLegacy     = $false
+if ($realAuthPreContent) {
+    try {
+        $preParsed = $realAuthPreContent | ConvertFrom-Json -ErrorAction Stop
+        if ($preParsed -and $preParsed.PSObject.Properties.Name -contains 'OPENAI_API_KEY' -and
+            [string]$preParsed.OPENAI_API_KEY -eq $LegacyManagedAuthSentinelKey) {
+            $realAuthHadLegacy = $true
+        }
+    } catch { }
+}
 
 # ----------------------------------------------------------------------------
 # 1. Launch the bridge (no Codex GUI)
@@ -159,12 +187,13 @@ if ($launcherOk) {
 }
 
 # ----------------------------------------------------------------------------
-# 2. Discover the bridge port (managed block records the actual port)
+# 2. Discover the bridge port (isolated config records the actual port)
 # ----------------------------------------------------------------------------
 
 $activePort = $BridgePort
-if (Test-Path -LiteralPath $configPath) {
-    $cfg = Get-Content -LiteralPath $configPath -Raw
+$isolatedConfigPath = Join-Path $isolatedHome 'config.toml'
+if (Test-Path -LiteralPath $isolatedConfigPath) {
+    $cfg = Get-Content -LiteralPath $isolatedConfigPath -Raw
     if ($cfg -and ($cfg -match 'base_url\s*=\s*"http://127\.0\.0\.1:(\d+)/v1"')) {
         $activePort = [int]$Matches[1]
     }
@@ -207,145 +236,224 @@ if (Test-Path -LiteralPath $bridgePid) {
 }
 
 # ----------------------------------------------------------------------------
-# 5. Managed block in ~/.codex/config.toml
+# 5. Isolated CODEX_HOME content
 # ----------------------------------------------------------------------------
 
-if (Test-Path -LiteralPath $configPath) {
-    $cfgRaw = Get-Content -LiteralPath $configPath -Raw
-    $hasBegin = $cfgRaw.Contains($ManagedBlockBegin)
-    $hasEnd   = $cfgRaw.Contains($ManagedBlockEnd)
-    $hasProvider = ($cfgRaw -match 'model_provider\s*=\s*"omniroute_bridge"')
-    $hasSection  = ($cfgRaw -match '\[model_providers\.omniroute_bridge\]')
-    $hasUrl      = ($cfgRaw -match ('base_url\s*=\s*"http://127\.0\.0\.1:{0}/v1"' -f $activePort))
-    if ($hasBegin -and $hasEnd -and $hasProvider -and $hasSection -and $hasUrl) {
-        Add-Result 'config-managed-block' 'PASS' "managed block present with port $activePort"
-    } else {
-        $missing = @()
-        if (-not $hasBegin)    { $missing += 'begin-marker' }
-        if (-not $hasEnd)      { $missing += 'end-marker' }
-        if (-not $hasProvider) { $missing += 'model_provider="omniroute_bridge"' }
-        if (-not $hasSection)  { $missing += '[model_providers.omniroute_bridge]' }
-        if (-not $hasUrl)      { $missing += "base_url=:$activePort" }
-        Add-Result 'config-managed-block' 'FAIL' ("missing: {0}" -f ($missing -join ', '))
-    }
+if (-not (Test-Path -LiteralPath $isolatedHome)) {
+    Add-Result 'isolated-home-present' 'FAIL' "isolated CODEX_HOME directory missing at $isolatedHome"
 } else {
-    Add-Result 'config-managed-block' 'FAIL' "config.toml not found at $configPath"
-}
+    Add-Result 'isolated-home-present' 'PASS' "isolated CODEX_HOME present at $isolatedHome"
 
-# ----------------------------------------------------------------------------
-# 6. Backup exists
-# ----------------------------------------------------------------------------
-
-if (Test-Path -LiteralPath $backupPath) {
-    Add-Result 'config-backup' 'PASS' "$backupPath present"
-} else {
-    Add-Result 'config-backup' 'FAIL' "$backupPath missing -- -Restore will not recover original"
-}
-
-# ----------------------------------------------------------------------------
-# 6a. Managed auth.json (API-key sentinel)
-# ----------------------------------------------------------------------------
-#
-# This is the core invariant for the bridge-bypass fix. Codex Desktop only
-# routes /v1/responses through our bridge when it is in API-key auth mode,
-# which it picks based on the contents of ~/.codex/auth.json. So the
-# verifier MUST see:
-#   - the live ~/.codex/auth.json exists,
-#   - parses as JSON,
-#   - has OPENAI_API_KEY == sk-omniroute-managed,
-#   - has tokens == null (i.e. no leftover OAuth/ChatGPT session that
-#     would tempt Desktop back into the OAuth path).
-$authParsed = $null
-$authPresent = Test-Path -LiteralPath $authPath
-if ($authPresent) {
-    try {
-        $authRaw = Get-Content -LiteralPath $authPath -Raw
-        if (-not [string]::IsNullOrWhiteSpace($authRaw)) {
-            $authParsed = $authRaw | ConvertFrom-Json -ErrorAction Stop
-        }
-    } catch {
-        Add-Result 'auth-managed-form' 'FAIL' "auth.json present but not valid JSON: $($_.Exception.Message)"
-        $authParsed = $null
-    }
-}
-if (-not $authPresent) {
-    Add-Result 'auth-managed-form' 'FAIL' "auth.json not found at $authPath (Desktop will fall back to default OAuth flow)"
-} elseif ($null -ne $authParsed) {
-    $authKey = $null
-    $authTokens = '__unset__'
-    try { $authKey = $authParsed.OPENAI_API_KEY } catch { }
-    try { $authTokens = $authParsed.tokens } catch { }
-    $keyOk = ([string]$authKey -eq $ManagedAuthSentinelApiKey)
-    $tokensOk = ($null -eq $authTokens)
-    if ($keyOk -and $tokensOk) {
-        Add-Result 'auth-managed-form' 'PASS' "OPENAI_API_KEY=sentinel, tokens=null (Desktop is in API-key auth mode)"
-    } else {
-        $why = @()
-        if (-not $keyOk)   { $why += "OPENAI_API_KEY != sentinel" }
-        if (-not $tokensOk){ $why += "tokens is not null (OAuth session still present)" }
-        Add-Result 'auth-managed-form' 'FAIL' ($why -join '; ')
-    }
-}
-
-# ----------------------------------------------------------------------------
-# 6b. auth.json backup exists when the user had a pre-existing auth.json
-# ----------------------------------------------------------------------------
-if ($authPreExisted) {
-    if (Test-Path -LiteralPath $authBackupPath) {
-        Add-Result 'auth-backup' 'PASS' "$authBackupPath present (will be restored on -Restore / Official mode)"
-    } else {
-        Add-Result 'auth-backup' 'FAIL' "user had auth.json before launch but no backup was created at $authBackupPath"
-    }
-} else {
-    # No user auth.json before launch. The launcher still creates a
-    # zero-byte backup as the "no original existed" sentinel, so -Restore
-    # knows to DELETE the managed file rather than leave it in place. We
-    # accept either the empty backup or no backup (some host filesystems
-    # might choose to omit it); both are recoverable.
-    if (Test-Path -LiteralPath $authBackupPath) {
-        $abLen = (Get-Item -LiteralPath $authBackupPath).Length
-        if ($abLen -eq 0) {
-            Add-Result 'auth-backup' 'PASS' "empty backup sentinel (no original auth.json existed)"
+    # 5a. config.toml in isolated home points at the bridge
+    if (Test-Path -LiteralPath $isolatedConfigPath) {
+        $isoCfg = Get-Content -LiteralPath $isolatedConfigPath -Raw
+        $hasProvider = ($isoCfg -match 'model_provider\s*=\s*"omniroute_bridge"')
+        $hasSection  = ($isoCfg -match '\[model_providers\.omniroute_bridge\]')
+        $hasUrl      = ($isoCfg -match ('base_url\s*=\s*"http://127\.0\.0\.1:{0}/v1"' -f $activePort))
+        if ($hasProvider -and $hasSection -and $hasUrl) {
+            Add-Result 'isolated-config-toml' 'PASS' "isolated config.toml selects omniroute_bridge on :$activePort"
         } else {
-            Add-Result 'auth-backup' 'WARN' "no original auth.json existed but backup has content (length=$abLen)"
+            $missing = @()
+            if (-not $hasProvider) { $missing += 'model_provider="omniroute_bridge"' }
+            if (-not $hasSection)  { $missing += '[model_providers.omniroute_bridge]' }
+            if (-not $hasUrl)      { $missing += "base_url=:$activePort" }
+            Add-Result 'isolated-config-toml' 'FAIL' ("missing in isolated config.toml: {0}" -f ($missing -join ', '))
         }
     } else {
-        Add-Result 'auth-backup' 'WARN' "no pre-existing auth.json and no backup; -Restore will remove the managed file in place"
+        Add-Result 'isolated-config-toml' 'FAIL' "isolated config.toml not found at $isolatedConfigPath"
     }
-}
 
-# ----------------------------------------------------------------------------
-# 6c. Diagnostic: bridge confirms Desktop will NOT bypass via OAuth session
-# ----------------------------------------------------------------------------
-#
-# /healthz inspects the live ~/.codex/auth.json itself (independent of
-# whatever path the bridge was told to use for the official fallback) and
-# reports two flags: sentinel_present and oauth_tokens_present. This is
-# what catches the "we forgot to write auth.json, Desktop is still in
-# ChatGPT-session mode" regression that motivated this whole effort.
-$diagPass = $false
-$diagDetail = ''
-if ($health -and $health.managed_auth) {
-    $sentinelPresent = [bool]$health.managed_auth.sentinel_present
-    $oauthPresent    = [bool]$health.managed_auth.oauth_tokens_present
-    if ($sentinelPresent -and (-not $oauthPresent)) {
-        $diagPass = $true
-        $diagDetail = "live auth.json has sentinel and no OAuth tokens"
+    # 5b. auth.json in isolated home has real OAuth tokens (we copied
+    # them from the user's real ~/.codex/auth.json), NOT the legacy
+    # sentinel.
+    $isolatedAuthPath = Join-Path $isolatedHome 'auth.json'
+    if (Test-Path -LiteralPath $isolatedAuthPath) {
+        try {
+            $isoAuth = Get-Content -LiteralPath $isolatedAuthPath -Raw | ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            $isoAuth = $null
+        }
+        if ($null -ne $isoAuth) {
+            $isSentinel = $false
+            try {
+                if ($isoAuth.PSObject.Properties.Name -contains 'OPENAI_API_KEY' -and
+                    [string]$isoAuth.OPENAI_API_KEY -eq $LegacyManagedAuthSentinelKey) {
+                    $isSentinel = $true
+                }
+            } catch { }
+            $hasOAuth = $false
+            try {
+                if ($isoAuth.PSObject.Properties.Name -contains 'tokens' -and $isoAuth.tokens) {
+                    if ($isoAuth.tokens.PSObject.Properties.Name -contains 'access_token' -and
+                        -not [string]::IsNullOrWhiteSpace([string]$isoAuth.tokens.access_token)) {
+                        $hasOAuth = $true
+                    }
+                }
+            } catch { }
+            if ($isSentinel) {
+                Add-Result 'isolated-auth-json' 'FAIL' "isolated auth.json is the legacy sentinel (sk-omniroute-managed); should be a real OAuth copy"
+            } elseif ($hasOAuth) {
+                Add-Result 'isolated-auth-json' 'PASS' "isolated auth.json has real OAuth tokens"
+            } elseif ($realAuthPreExisted) {
+                Add-Result 'isolated-auth-json' 'FAIL' "isolated auth.json present but has no OAuth tokens, even though user has a real ~/.codex/auth.json"
+            } else {
+                Add-Result 'isolated-auth-json' 'WARN' "isolated auth.json present but no OAuth tokens (user has no real auth.json yet)"
+            }
+        } else {
+            Add-Result 'isolated-auth-json' 'WARN' "isolated auth.json present but did not parse as JSON"
+        }
     } else {
-        $why = @()
-        if (-not $sentinelPresent) { $why += "sentinel not in live auth.json" }
-        if ($oauthPresent)         { $why += "live auth.json STILL has tokens.access_token (Desktop will bypass bridge)" }
-        $diagDetail = $why -join '; '
+        if ($realAuthPreExisted) {
+            Add-Result 'isolated-auth-json' 'FAIL' "user has a real ~/.codex/auth.json but launcher did NOT copy it into the isolated home"
+        } else {
+            Add-Result 'isolated-auth-json' 'WARN' "isolated auth.json missing (no real auth.json to copy from)"
+        }
     }
-}
-if ($diagPass) {
-    Add-Result 'desktop-not-stuck-in-oauth' 'PASS' $diagDetail
-} else {
-    Add-Result 'desktop-not-stuck-in-oauth' 'FAIL' ($diagDetail | ForEach-Object { if ($_) { $_ } else { 'no managed_auth diagnostic in /healthz response' } })
+
+    # 5c. seed stamp present (used by the bridge to compute
+    # desktop_codex_home_honored)
+    $isolatedStampPath = Join-Path $isolatedHome '.omniroute-seed.json'
+    if (Test-Path -LiteralPath $isolatedStampPath) {
+        Add-Result 'isolated-seed-stamp' 'PASS' "seed stamp present at $isolatedStampPath"
+    } else {
+        Add-Result 'isolated-seed-stamp' 'FAIL' "seed stamp missing at $isolatedStampPath"
+    }
+
+    # 5d. state_5.sqlite must be absent at seed time. Codex Desktop
+    # creates it on first boot; if it's present BEFORE Desktop runs,
+    # something seeded it (regression).
+    $isolatedStatePath = Join-Path $isolatedHome 'state_5.sqlite'
+    if (Test-Path -LiteralPath $isolatedStatePath) {
+        # If Codex Desktop ran in a previous session and is no longer
+        # running, the file may still be on disk. Treat as WARN because
+        # we can't tell from the verifier alone, and the bridge's
+        # /healthz fields below give the operator a clearer picture.
+        Add-Result 'isolated-state-sqlite-absent' 'WARN' "state_5.sqlite present in isolated home (probably from a previous Codex Desktop run)"
+    } else {
+        Add-Result 'isolated-state-sqlite-absent' 'PASS' "state_5.sqlite absent at seed time (Desktop will read fresh config.toml)"
+    }
 }
 
 # ----------------------------------------------------------------------------
-# 7. Official launcher DryRun (with -NoAutoRestore so we don't wipe managed state)
+# 6. /healthz Variant-3 diagnostics
+# ----------------------------------------------------------------------------
+
+if ($health) {
+    $hits = if ($health.PSObject.Properties.Name -contains 'main_reasoning_hits') { [int]$health.main_reasoning_hits } else { -1 }
+    $honored = if ($health.PSObject.Properties.Name -contains 'desktop_codex_home_honored') { [bool]$health.desktop_codex_home_honored } else { $false }
+    $stampPresent = $false
+    if ($health.PSObject.Properties.Name -contains 'isolated_home' -and $health.isolated_home) {
+        if ($health.isolated_home.PSObject.Properties.Name -contains 'seed_stamp_present') {
+            $stampPresent = [bool]$health.isolated_home.seed_stamp_present
+        }
+    }
+    $authPresent = if ($health.PSObject.Properties.Name -contains 'official_auth_present') { [bool]$health.official_auth_present } else { $false }
+
+    if ($hits -eq 0) {
+        Add-Result 'healthz-counter-fresh' 'PASS' "main_reasoning_hits=0 at boot (will rise when Codex Desktop sends chat traffic)"
+    } else {
+        Add-Result 'healthz-counter-fresh' 'WARN' "main_reasoning_hits=$hits at boot (expected 0; bridge may have served prior requests)"
+    }
+
+    if ($stampPresent) {
+        Add-Result 'healthz-stamp-visible' 'PASS' 'bridge sees isolated_home.seed_stamp_present=true'
+    } else {
+        Add-Result 'healthz-stamp-visible' 'FAIL' 'bridge sees isolated_home.seed_stamp_present=false (launcher did not seed)'
+    }
+
+    # honored=false is the EXPECTED state at -NoCodex time (Desktop
+    # never ran). honored=true here would mean state_5.sqlite already
+    # exists or auth.json was modified -- not a fatal regression but
+    # worth surfacing.
+    if (-not $honored) {
+        Add-Result 'healthz-honored-fresh' 'PASS' 'desktop_codex_home_honored=false at boot (Desktop has not touched isolated home yet)'
+    } else {
+        Add-Result 'healthz-honored-fresh' 'WARN' 'desktop_codex_home_honored=true at boot (state_5.sqlite or modified seed file present)'
+    }
+
+    if ($authPresent) {
+        Add-Result 'healthz-auth-present' 'PASS' 'bridge sees official_auth_present=true (real OAuth tokens copied)'
+    } elseif ($realAuthPreExisted) {
+        Add-Result 'healthz-auth-present' 'FAIL' 'bridge sees official_auth_present=false even though user has a real ~/.codex/auth.json'
+    } else {
+        Add-Result 'healthz-auth-present' 'WARN' 'bridge sees official_auth_present=false (user has no real auth.json to copy)'
+    }
+} else {
+    Add-Result 'healthz-counter-fresh'  'FAIL' '/healthz did not respond; cannot read Variant-3 diagnostics'
+    Add-Result 'healthz-stamp-visible'  'FAIL' '/healthz did not respond'
+    Add-Result 'healthz-honored-fresh'  'FAIL' '/healthz did not respond'
+    Add-Result 'healthz-auth-present'   'FAIL' '/healthz did not respond'
+}
+
+# ----------------------------------------------------------------------------
+# 7. Real ~/.codex is UNTOUCHED
+# ----------------------------------------------------------------------------
+
+# 7a. config.toml has no managed block. Under Variant 3 the launcher
+# never writes to this file -- with one exception: if the user is
+# upgrading from PR-#2/#3, the legacy-cleanup pass strips the stale
+# managed block on launch. That is expected. So we PASS when:
+#   - pre-launch had a managed block AND post-launch does not, OR
+#   - pre-launch had no managed block AND post-launch content matches.
+# Anything else is a regression.
+$realCfgAfter = if (Test-Path -LiteralPath $realConfigPath) { Get-Content -LiteralPath $realConfigPath -Raw } else { $null }
+$realCfgChanged = ($realCfgAfter -ne $realConfigPreContent)
+$realCfgHasManagedBlock = ($null -ne $realCfgAfter -and $realCfgAfter.Contains($LegacyManagedBlockBegin))
+# Snapshot the post-cleanup state. The round-trip check uses THIS as
+# the baseline so -Restore is allowed to leave the cleaned config in
+# place (the cleanup is idempotent: a second pass is a no-op).
+$realConfigCleanContent = $realCfgAfter
+if ($realCfgHasManagedBlock) {
+    Add-Result 'real-config-untouched' 'FAIL' "real ~/.codex/config.toml still contains a managed block (legacy artifact not cleaned)"
+} elseif ($realConfigHadLegacy) {
+    Add-Result 'real-config-untouched' 'PASS' 'launcher stripped legacy managed block from real ~/.codex/config.toml (upgrade cleanup)'
+} elseif ($realCfgChanged) {
+    Add-Result 'real-config-untouched' 'FAIL' "real ~/.codex/config.toml content changed without a legacy block to clean up; launcher modified clean real config"
+} else {
+    Add-Result 'real-config-untouched' 'PASS' 'real ~/.codex/config.toml unchanged by launcher'
+}
+
+# 7b. auth.json is NOT the API-key sentinel and matches pre-launch
+# content. Under Variant 3 we copy auth.json into the isolated home;
+# we never overwrite the real one.
+$realAuthAfterExists = Test-Path -LiteralPath $realAuthPath
+$realAuthAfter = if ($realAuthAfterExists) { Get-Content -LiteralPath $realAuthPath -Raw } else { $null }
+$realAuthChanged = ($realAuthAfter -ne $realAuthPreContent)
+$realAuthIsSentinel = $false
+if ($realAuthAfter) {
+    try {
+        $parsed = $realAuthAfter | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed -and $parsed.PSObject.Properties.Name -contains 'OPENAI_API_KEY' -and
+            [string]$parsed.OPENAI_API_KEY -eq $LegacyManagedAuthSentinelKey) {
+            $realAuthIsSentinel = $true
+        }
+    } catch { }
+}
+# Snapshot the post-cleanup state for the round-trip check (mirrors
+# how we handle config.toml above).
+$realAuthCleanContent = $realAuthAfter
+if ($realAuthIsSentinel) {
+    Add-Result 'real-auth-untouched' 'FAIL' "real ~/.codex/auth.json is the legacy API-key sentinel (Variant-3 launcher should not write this)"
+} elseif ($realAuthHadLegacy) {
+    Add-Result 'real-auth-untouched' 'PASS' 'launcher removed legacy sentinel auth.json from real ~/.codex (upgrade cleanup)'
+} elseif ($realAuthChanged) {
+    Add-Result 'real-auth-untouched' 'FAIL' "real ~/.codex/auth.json content changed without a legacy sentinel to clean up; launcher modified clean real auth"
+} else {
+    Add-Result 'real-auth-untouched' 'PASS' 'real ~/.codex/auth.json unchanged by launcher'
+}
+
+# 7c. No *.codex-omniroute-backup files left behind.
+$backupsRemain = @()
+if (Test-Path -LiteralPath $LegacyConfigBackup) { $backupsRemain += 'config.toml.codex-omniroute-backup' }
+if (Test-Path -LiteralPath $LegacyAuthBackup)   { $backupsRemain += 'auth.json.codex-omniroute-backup' }
+if ($backupsRemain.Count -eq 0) {
+    Add-Result 'real-no-legacy-backups' 'PASS' 'no *.codex-omniroute-backup files in real ~/.codex'
+} else {
+    Add-Result 'real-no-legacy-backups' 'FAIL' ("legacy backup files still present: {0}" -f ($backupsRemain -join ', '))
+}
+
+# ----------------------------------------------------------------------------
+# 8. Official launcher DryRun (with -NoAutoRestore so we don't disturb state)
 # ----------------------------------------------------------------------------
 
 $officialOk = $true
@@ -380,7 +488,7 @@ if ($officialOk) {
 }
 
 # ----------------------------------------------------------------------------
-# 8. GET /v1/models reachable
+# 9. GET /v1/models reachable
 # ----------------------------------------------------------------------------
 
 $modelsStatus = $null
@@ -400,7 +508,7 @@ if ($modelsStatus -eq 200) {
 }
 
 # ----------------------------------------------------------------------------
-# 9. POST /transcribe reachable (route exists)
+# 10. POST /transcribe reachable (route exists)
 # ----------------------------------------------------------------------------
 
 $transcribeStatus = $null
@@ -420,7 +528,7 @@ if ($transcribeStatus -and $transcribeStatus -ne 404) {
 }
 
 # ----------------------------------------------------------------------------
-# 10. Live smoke (optional)
+# 11. Live smoke (optional)
 # ----------------------------------------------------------------------------
 
 if ($Live) {
@@ -444,103 +552,44 @@ if ($Live) {
 }
 
 # ----------------------------------------------------------------------------
-# 11. -Restore round-trip
+# 12. -Restore round-trip
 # ----------------------------------------------------------------------------
 
 if (-not $LeaveBridgeRunning) {
-    $backupExistedBefore     = Test-Path -LiteralPath $backupPath
-    $authBackupExistedBefore = Test-Path -LiteralPath $authBackupPath
     & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -Restore | Out-Null
     $restoreExit = $LASTEXITCODE
 
-    $configAfter    = if (Test-Path -LiteralPath $configPath) { Get-Content -LiteralPath $configPath -Raw } else { $null }
-    $authAfterExist = Test-Path -LiteralPath $authPath
-    $authAfter      = if ($authAfterExist) { Get-Content -LiteralPath $authPath -Raw } else { $null }
-    $backupGone     = -not (Test-Path -LiteralPath $backupPath)
-    $authBackupGone = -not (Test-Path -LiteralPath $authBackupPath)
+    $isolatedGone   = -not (Test-Path -LiteralPath $isolatedHome)
     $bridgeGone     = -not (Test-Path -LiteralPath $bridgePid)
+    $configBackupGone = -not (Test-Path -LiteralPath $LegacyConfigBackup)
+    $authBackupGone   = -not (Test-Path -LiteralPath $LegacyAuthBackup)
 
-    # Semantic restore check (was: byte-for-byte equality with the backup).
-    # The launcher always reads the backup as a .NET string and re-writes it
-    # via WriteAllText with UTF8-no-BOM. On real Windows this can differ in
-    # bytes from the original backup file when the original was UTF-8 with
-    # BOM or used CR-only line endings, even though the config is logically
-    # restored. The invariants we actually care about for catching regressions
-    # are:
-    #   - launcher exited 0
-    #   - backup file was consumed and removed
-    #   - bridge.pid was removed (bridge stopped)
-    #   - config no longer contains the managed block (if backup existed)
-    #     OR config was deleted entirely (if backup was empty / no original)
-    $blockGone = $true
-    if ($backupExistedBefore) {
-        if ($null -ne $configAfter -and $configAfter.Contains($ManagedBlockBegin)) {
-            $blockGone = $false
-        }
-        # If the original config had real content, expect the file to still
-        # exist after restore. If the backup was empty (sentinel for "no
-        # original"), the launcher deletes the config -- that's correct too.
-    } else {
-        # No backup at restore-time means -Restore had to fall back to the
-        # in-place strip path. Config must not contain a managed block.
-        if ($null -ne $configAfter -and $configAfter.Contains($ManagedBlockBegin)) {
-            $blockGone = $false
-        }
-    }
+    # The real ~/.codex must still match the POST-CLEANUP snapshot
+    # taken after the initial launch (see real-config-untouched and
+    # real-auth-untouched checks above). We use the post-cleanup
+    # baseline (not the pre-launch one) because the launcher's legacy
+    # cleanup pass is idempotent and -Restore should be a no-op against
+    # an already-clean real ~/.codex.
+    $realConfigAfterRestore = if (Test-Path -LiteralPath $realConfigPath) { Get-Content -LiteralPath $realConfigPath -Raw } else { $null }
+    $realAuthAfterRestore   = if (Test-Path -LiteralPath $realAuthPath)   { Get-Content -LiteralPath $realAuthPath -Raw }   else { $null }
+    $realConfigUntouched    = ($realConfigAfterRestore -eq $realConfigCleanContent)
+    $realAuthUntouched      = ($realAuthAfterRestore -eq $realAuthCleanContent)
 
-    # auth.json side of the round-trip:
-    #   - the managed sentinel must be gone (whether by restoring the
-    #     original from backup or by deleting the file entirely),
-    #   - the auth backup file itself must be consumed,
-    #   - if a non-empty backup existed BEFORE restore, the live
-    #     auth.json must exist again afterwards (we recovered the user's
-    #     OAuth session); if no original existed, the live file should be
-    #     deleted.
-    $authSentinelGone = $true
-    if ($authAfterExist -and $null -ne $authAfter -and $authAfter.Contains($ManagedAuthSentinelApiKey)) {
-        $authSentinelGone = $false
-    }
-    $authRestoredCorrectly = $true
-    $authReason = ''
-    if ($authPreExisted) {
-        # User had a real auth.json -- after restore the live file should
-        # exist again and (best effort) match the snapshot we took before
-        # the launcher ran.
-        if (-not $authAfterExist) {
-            $authRestoredCorrectly = $false
-            $authReason = 'user had auth.json before launch but it is missing after restore'
-        } elseif ($null -ne $authPreContent -and $authAfter -ne $authPreContent) {
-            # Mismatch: still count as PASS as long as the sentinel is gone
-            # (mirrors the config check above which is semantic, not
-            # byte-for-byte), but surface the diff in the detail.
-            $authReason = 'live auth.json differs from pre-launch snapshot but sentinel is gone (semantic restore)'
-        }
-    } else {
-        # No original auth.json -- after restore the live file should be
-        # absent (the launcher removes the managed sentinel file when
-        # the backup is empty).
-        if ($authAfterExist -and (-not $authSentinelGone)) {
-            $authRestoredCorrectly = $false
-            $authReason = 'managed sentinel auth.json still present (no original existed)'
-        }
-    }
-
-    $allOk = ($restoreExit -eq 0) -and $blockGone -and $backupGone -and `
-             $authSentinelGone -and $authBackupGone -and $authRestoredCorrectly -and $bridgeGone
+    $allOk = ($restoreExit -eq 0) -and $isolatedGone -and $bridgeGone -and `
+             $configBackupGone -and $authBackupGone -and `
+             $realConfigUntouched -and $realAuthUntouched
 
     if ($allOk) {
-        $detail = 'managed block removed, config backup cleared, auth.json restored, auth backup cleared, bridge stopped'
-        if ($authReason) { $detail += " ($authReason)" }
-        Add-Result 'restore-roundtrip' 'PASS' $detail
+        Add-Result 'restore-roundtrip' 'PASS' 'isolated home removed, bridge stopped, legacy backups gone, real ~/.codex untouched'
     } else {
         $why = @()
         if ($restoreExit -ne 0)         { $why += "exit=$restoreExit" }
-        if (-not $blockGone)            { $why += 'managed block still present in config' }
-        if (-not $backupGone)           { $why += 'config backup file still present' }
-        if (-not $authSentinelGone)     { $why += 'sentinel API key still in live auth.json' }
-        if (-not $authBackupGone)       { $why += 'auth backup file still present' }
-        if (-not $authRestoredCorrectly){ $why += "auth.json restore wrong: $authReason" }
+        if (-not $isolatedGone)         { $why += 'isolated CODEX_HOME still present' }
         if (-not $bridgeGone)           { $why += 'bridge.pid still present' }
+        if (-not $configBackupGone)     { $why += 'legacy config.toml.codex-omniroute-backup still present' }
+        if (-not $authBackupGone)       { $why += 'legacy auth.json.codex-omniroute-backup still present' }
+        if (-not $realConfigUntouched)  { $why += 'real ~/.codex/config.toml content changed' }
+        if (-not $realAuthUntouched)    { $why += 'real ~/.codex/auth.json content changed' }
         Add-Result 'restore-roundtrip' 'FAIL' ($why -join '; ')
     }
 }

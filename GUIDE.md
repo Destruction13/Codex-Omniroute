@@ -27,13 +27,13 @@ To go back to vanilla Codex (your normal account, full quota in play):
 .\Start-Codex-Official.ps1
 ```
 
-The official launcher automatically restores your original `config.toml` from the backup and stops the managed bridge before activating Codex, so the switch is seamless. You can also restore explicitly:
+The official launcher just stops the bridge and activates the unmodified Codex package against your real `~/.codex/`. Because OmniRoute mode never writes to your real `~/.codex/`, there is nothing to restore. You can also clear the isolated home explicitly:
 
 ```powershell
 .\Start-Codex-OmniRoute.ps1 -Restore
 ```
 
-That stops the bridge and removes the OmniRoute managed block, leaving your `~/.codex/config.toml` exactly as it was.
+That stops the bridge and deletes the isolated `.codex-omniroute-home/` next to the launcher. Your real `~/.codex/` is left untouched.
 
 ## How OmniRoute mode affects your machine
 
@@ -41,12 +41,13 @@ OmniRoute mode is intentionally lightweight. Per launch it touches:
 
 | Path | What happens |
 |---|---|
-| `~/.codex/config.toml` | A clearly-marked managed block is appended (or replaced if one is already there) between `# >>> codex-omniroute-managed` and `# <<< codex-omniroute-managed` markers. Conflicting bare top-level keys (`model_provider`, `model`, `profile`, `model_reasoning_effort`) outside any section are stripped. Your `[mcp_servers.*]`, `[plugins.*]`, etc. are untouched. |
-| `~/.codex/config.toml.codex-omniroute-backup` | First-launch snapshot of the original file. `-Restore` puts it back byte-for-byte. |
+| `.codex-omniroute-home/` (next to the launcher) | **Re-seeded every launch.** Contains a fresh `config.toml` selecting `model_provider = "omniroute_bridge"`, a verbatim copy of your real `~/.codex/auth.json` (so Codex Desktop stays signed in as you), a copy of your real `~/.codex/models_cache.json` (if present), and a `.omniroute-seed.json` stamp the bridge uses to compute `desktop_codex_home_honored`. `state_5.sqlite` is deliberately absent so Codex Desktop reads the fresh `config.toml` on the first new-thread create. |
+| `CODEX_HOME` environment variable (set in the launched process only) | Points at the isolated dir. **No other env vars are overridden** — `USERPROFILE`, `APPDATA`, `HOME`, `TEMP`, and `PATH` all stay real. |
+| `~/.codex/` (your real one) | **Not modified.** The only exception is a one-shot legacy-cleanup pass that removes leftover managed-block / sentinel-`auth.json` / `*.codex-omniroute-backup` artifacts from earlier repo versions, if you're upgrading. |
 | `bridge.pid` (next to the launcher) | PID of the managed node bridge process. |
 | `bridge.log` (next to the launcher) | Append-only log of bridge activity. |
 
-That's it. No env-var overrides. No `.codex-omniroute-home/`. No payload copy. No registry edits. The official Codex package keeps its own identity and runs against your normal `%USERPROFILE%`, so file dialogs, `git`, SSH, your projects, your Documents, and your Desktop are all visible as usual.
+That's it. The official Codex package keeps its own identity and runs against your normal `%USERPROFILE%`, so file dialogs, `git`, SSH, your projects, your Documents, and your Desktop are all visible as usual. Only the Codex Desktop's `config.toml` / `auth.json` / `models_cache.json` / `state_5.sqlite` lookup hits the isolated `CODEX_HOME` — nothing else does.
 
 ## How to confirm rerouting is actually happening
 
@@ -64,16 +65,21 @@ You can also hit the local health endpoint (port is logged at launcher startup; 
 Invoke-RestMethod http://127.0.0.1:20333/healthz
 ```
 
+The response contains two Variant-3 fields that answer "is Codex Desktop actually routing through the bridge?":
+
+- `main_reasoning_hits`: counter that increments every time the bridge forwards a `/v1/responses` or `/v1/chat/completions` request to OmniRoute. After you send one chat message, this should be `>= 1`.
+- `desktop_codex_home_honored`: `true` once Codex Desktop has measurably touched the isolated home (typically by creating `state_5.sqlite`). If this stays `false` after Codex Desktop has been open for a while, your build of Codex Desktop is ignoring `CODEX_HOME` — escalate via an issue so we can switch you to a TLS-MITM fallback.
+
 ## Switching back: -Restore vs Start-Codex-Official.ps1
 
-Both reverse OmniRoute mode. Use whichever fits your workflow:
+Use whichever fits your workflow:
 
-- `Start-Codex-Official.ps1` — auto-restore + activate the official Codex GUI. Use this when you want to keep working in Codex but without OmniRoute.
-- `Start-Codex-OmniRoute.ps1 -Restore` — auto-restore without launching anything. Use this in scripts or when you don't want a Codex window.
+- `Start-Codex-Official.ps1` — stop the bridge + activate the official Codex GUI against your real `~/.codex/`. Use this when you want to keep working in Codex but without OmniRoute.
+- `Start-Codex-OmniRoute.ps1 -Restore` — stop the bridge + delete the isolated `.codex-omniroute-home/` without launching anything. Use this in scripts or when you want a clean isolated state on next launch.
 
-Both delete `bridge.pid` and `config.toml.codex-omniroute-backup` once the restore is complete, so the next OmniRoute launch starts from a clean slate.
+Both delete `bridge.pid`. Neither modifies your real `~/.codex/` in steady state (the launchers' one-shot legacy-cleanup pass only runs if you're upgrading from an earlier repo version that left a managed block / sentinel / backup file behind).
 
-If you ever want to inspect the OmniRoute-managed state without disturbing it, pass `-NoAutoRestore` to the official launcher (it'll resolve the package but skip the restore step).
+If you want the official launcher to skip even the bridge-stop / legacy-cleanup step (e.g. to inspect leftover state without disturbing it), pass `-NoAutoRestore`.
 
 ## Tunneling OmniRoute
 
@@ -143,9 +149,16 @@ The path is forwarded to the AppX activation as the activation argument, which m
 
 ## MCP
 
-MCP servers are inherited from your real `~/.codex/config.toml` automatically — OmniRoute doesn't touch them. The managed block only adds the `omniroute_bridge` provider and `omniroute_managed` profile; everything else (your `[mcp_servers.*]`, `[plugins.*]`, marketplaces) is preserved as-is.
+Under Variant 3, Codex Desktop reads its config from the isolated `.codex-omniroute-home/config.toml`, **not** your real `~/.codex/config.toml`. The launcher rewrites the isolated config from scratch on every launch with only the `omniroute_bridge` provider + `omniroute_managed` profile + freeform-apply-patch toggle.
 
-If a specific MCP server misbehaves (e.g. leaks non-JSON onto its JSON-RPC stdout pipe because it wraps `taskkill` or `powershell.exe`), the optional `tools/mcp-stdio-shield.mjs` wrapper drops non-JSON lines before they reach Codex. To use it, edit `~/.codex/config.toml` manually for that server:
+This is a **deliberate trade-off** of the narrow-isolation approach. MCP servers, plugins, and other customizations you have in your real `~/.codex/config.toml` are not visible in OmniRoute mode. Options if you need them:
+
+- **Run vanilla Codex** (`Start-Codex-Official.bat`) when you need your MCP servers \u2014 it uses your real `~/.codex/config.toml`.
+- **Re-create them in the isolated config**: open `.codex-omniroute-home/config.toml` between launches and append your `[mcp_servers.*]` / `[plugins.*]` blocks. The launcher will wipe them on the next OmniRoute launch (current behavior), so this is best for short experiments \u2014 see the project issue tracker for plans to extend the launcher with a user-additions overlay.
+
+MCP servers themselves, when launched from the isolated config, still run as subprocesses against your real `%USERPROFILE%` (the launcher doesn't override that env var), so your `.gitconfig`, SSH keys, project files, etc. are visible to MCP servers the same way they would be in vanilla Codex.
+
+If a specific MCP server misbehaves (e.g. leaks non-JSON onto its JSON-RPC stdout pipe because it wraps `taskkill` or `powershell.exe`), the optional `tools/mcp-stdio-shield.mjs` wrapper drops non-JSON lines before they reach Codex. To use it, edit the appropriate config (`.codex-omniroute-home/config.toml` for OmniRoute mode, `~/.codex/config.toml` for vanilla Codex) for that server:
 
 ```toml
 [mcp_servers.noisy_server]
@@ -182,12 +195,14 @@ To disable the freeform flag for debugging:
 | `Get-AppxPackage OpenAI.Codex returned nothing` | Codex Store app not installed under this Windows user. | Install from Microsoft Store and sign in once. |
 | `models_cache_missing` from bridge `/v1/models` | `~/.codex/models_cache.json` not populated yet. | Open the official Codex once so it can fetch the list from `chatgpt.com`, then re-run the OmniRoute launcher. |
 | `omniroute_not_configured` from bridge `/v1/responses` | No env vars, no `omniroute-provider.json`, no OpenCode-style entry. | Set `OMNIROUTE_BASE_URL` + `OMNIROUTE_API_KEY` or run `Setup.bat` again. |
-| Codex feels "logged out" in OmniRoute mode | `~/.codex/auth.json` is empty or missing. | Open the official Codex once and sign in. The bridge reads your real `auth.json` for compact/dictation auth fallback. |
-| Compact or dictation fails with 401/403 from official upstream | Inbound auth missing and `auth.json` fallback insufficient. | Make sure the official Codex is signed in. Re-open it once to refresh the token. |
+| Codex feels "logged out" in OmniRoute mode | Either your real `~/.codex/auth.json` is empty/missing, or the launcher's copy into the isolated home failed. | Open the official Codex once and sign in. Then re-launch OmniRoute mode — it copies your real `auth.json` into the isolated home on every launch. |
+| Compact or dictation fails with 401/403 from official upstream | Codex Desktop's OAuth token is stale and the bridge can't refresh it. | Re-open the official Codex once to refresh the token, then re-launch OmniRoute mode (the launcher re-copies the fresh `auth.json`). |
+| `/healthz` shows `desktop_codex_home_honored: false` after you sent a chat | Codex Desktop on your build does not honor `CODEX_HOME`. | Open an issue. The repo has a TLS-MITM fallback path designed for this case. |
+| `/healthz` shows `main_reasoning_hits: 0` after you sent a chat | Codex Desktop is bypassing the bridge — typically because it ran with a stale config from before `CODEX_HOME` was set. | Quit Codex Desktop completely (right-click tray → Quit, not just close the window) and re-launch via `Start-Codex-OmniRoute.bat`. |
 | `EADDRINUSE` | Another process holds the bridge port. | Pass `-BridgePort <free port>`, or run `.\Start-Codex-OmniRoute.ps1 -Restore` to stop the previous bridge. |
 | `Failed to parse MCP message` in Codex's MCP log | Some MCP server is leaking non-JSON onto its stdout. | Wrap that single server with `tools\mcp-stdio-shield.mjs` (see MCP section above). |
 | Codex window looks indistinguishable from official Codex | That's the goal. The only thing different is where `/v1/responses` goes. |
-| You want a clean slate | Stop everything and revert your config. | `.\Start-Codex-OmniRoute.ps1 -Restore` |
+| You want a clean slate | Stop the bridge + delete the isolated `CODEX_HOME`. | `.\Start-Codex-OmniRoute.ps1 -Restore` |
 
 ## What gets gitignored (do not commit these)
 

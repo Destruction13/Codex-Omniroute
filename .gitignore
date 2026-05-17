@@ -1,7 +1,8 @@
 # Codex OmniRoute — never commit runtime/auth state
 
-# Legacy isolated runtime homes (left over from earlier architecture
-# revisions; harmless to keep ignored so old workspaces stay clean).
+# Variant-3 isolated CODEX_HOME (seeded by Start-Codex-OmniRoute.ps1 at
+# every launch; deleted by Start-Codex-OmniRoute.ps1 -Restore). Contains
+# a copy of the user's auth.json -- never commit.
 .codex-omniroute-home/
 .codex-omniroute-home-*/
 
