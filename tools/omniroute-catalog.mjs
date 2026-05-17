@@ -137,9 +137,13 @@ function isPlainObject(value) {
 
 function expandEnvString(value) {
   if (typeof value !== "string") return value;
-  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
+  // Supports ${VAR} and ${VAR:-default}. The default form falls back to the
+  // literal text after :- when the variable is unset/empty without emitting a
+  // warning, so non-secret defaults (e.g. localhost ports) stay in the JSON.
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
     const raw = process.env[name];
     if (raw === undefined || raw === null || raw === "") {
+      if (fallback !== undefined) return fallback;
       warn(`env var \${${name}} is not set; expanding to empty string`);
       return "";
     }
@@ -186,6 +190,28 @@ function tomlInlineTable(obj) {
   return `{ ${parts.join(", ")} }`;
 }
 
+// Optional Codex-recognised scalars on an mcp_servers.<name> block that the
+// helper just passes through verbatim when present in the catalog entry. Keep
+// this list narrow so unknown keys do not silently leak into config.toml.
+const OPTIONAL_NUMBER_KEYS = ["startup_timeout_sec", "tool_timeout_sec"];
+const OPTIONAL_BOOL_KEYS   = ["enabled"];
+
+function appendOptionalScalars(lines, server) {
+  for (const key of OPTIONAL_NUMBER_KEYS) {
+    if (server[key] === undefined || server[key] === null) continue;
+    const num = Number(server[key]);
+    if (!Number.isFinite(num)) {
+      warn(`server "${server.name}" has non-numeric ${key}=${preview(server[key])}; skipped key`);
+      continue;
+    }
+    lines.push(`${key} = ${num}`);
+  }
+  for (const key of OPTIONAL_BOOL_KEYS) {
+    if (server[key] === undefined || server[key] === null) continue;
+    lines.push(`${key} = ${server[key] ? "true" : "false"}`);
+  }
+}
+
 function emitMcpBlock(server) {
   const name = String(server.name || "").trim();
   if (!name) {
@@ -224,6 +250,7 @@ function emitMcpBlock(server) {
       const env = expandValue(server.env);
       lines.push(`env = ${tomlInlineTable(env)}`);
     }
+    appendOptionalScalars(lines, server);
   } else if (transport === "http" || transport === "streamable_http" || transport === "sse") {
     if (!server.url) {
       warn(`http server "${name}" missing url; skipped`);
@@ -235,6 +262,7 @@ function emitMcpBlock(server) {
       const headers = expandValue(server.headers);
       lines.push(`http_headers = ${tomlInlineTable(headers)}`);
     }
+    appendOptionalScalars(lines, server);
   } else {
     warn(`server "${name}" has unknown transport "${transport}"; skipped`);
     return null;

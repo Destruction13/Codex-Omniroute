@@ -1,14 +1,14 @@
 {
-  "_comment": "Codex OmniRoute -- bundled default catalog. Shipped with the fork so every user gets a working baseline MCP / skills set on first launch, even with no OmniRoute server reachable. Updates can flow centrally by setting OMNIROUTE_CATALOG_URL; see tools/omniroute-catalog.mjs.",
+  "_comment": "Codex OmniRoute -- bundled default catalog. Shipped with the fork so every user gets a working baseline MCP / skills set on first launch, even with no OmniRoute server reachable. API keys and personal tokens are NEVER stored here -- every secret is referenced as ${ENV_VAR} and resolved against the user's own environment at launch (see .env.example for the full list). Central updates can flow over the wire by setting OMNIROUTE_CATALOG_URL; see tools/omniroute-catalog.mjs.",
   "version": "2026-05-17",
   "servers": [
     {
-      "name": "filesystem",
+      "name": "prisma-mcp-server",
       "transport": "stdio_local",
-      "package": "@modelcontextprotocol/server-filesystem",
+      "package": "prisma",
       "version": "latest",
-      "args": ["${USERPROFILE}"],
-      "_doc": "Read/write access to the user's home directory. Args expand via process.env at write time, so the resulting config.toml is portable across machines."
+      "args": ["mcp"],
+      "_doc": "Prisma CLI in MCP mode. No auth required."
     },
     {
       "name": "sequential-thinking",
@@ -18,11 +18,102 @@
       "_doc": "Structured chain-of-thought scratchpad. No auth required."
     },
     {
-      "name": "everything",
+      "name": "mem0-mcp",
       "transport": "stdio_local",
-      "package": "@modelcontextprotocol/server-everything",
+      "package": "@mem0/mcp-server",
       "version": "latest",
-      "_doc": "Reference MCP server exposing tools/resources/prompts -- useful smoke test for the runtime."
+      "env": {
+        "MEM0_API_KEY": "${MEM0_API_KEY}"
+      },
+      "_doc": "Mem0 personal-memory MCP. Requires MEM0_API_KEY from https://app.mem0.ai/dashboard/api-keys ."
+    },
+    {
+      "name": "chrome-devtools",
+      "transport": "stdio_local",
+      "package": "chrome-devtools-mcp",
+      "version": "latest",
+      "startup_timeout_sec": 60,
+      "_doc": "Chrome DevTools MCP. Talks to a running Chrome via CDP. No auth required."
+    },
+    {
+      "name": "github",
+      "transport": "stdio_local",
+      "package": "@modelcontextprotocol/server-github",
+      "version": "latest",
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      },
+      "_doc": "Official GitHub MCP. Requires GITHUB_PERSONAL_ACCESS_TOKEN (fine-grained or classic) from https://github.com/settings/tokens . Each user must generate their own -- never reuse another user's token."
+    },
+    {
+      "name": "deepcontext",
+      "transport": "stdio_local",
+      "package": "@wildcard-ai/deepcontext",
+      "version": "latest",
+      "env": {
+        "WILDCARD_API_KEY": "${WILDCARD_API_KEY}"
+      },
+      "_doc": "Wildcard DeepContext MCP. Requires WILDCARD_API_KEY from https://wildcard.ai dashboard."
+    },
+    {
+      "name": "magic",
+      "transport": "stdio_local",
+      "package": "@21st-dev/magic",
+      "version": "latest",
+      "env": {
+        "API_KEY": "${TWENTY_FIRST_API_KEY}"
+      },
+      "_doc": "21st-dev Magic frontend MCP. Requires TWENTY_FIRST_API_KEY from https://21st.dev/magic console."
+    },
+    {
+      "name": "shadcn",
+      "transport": "stdio_local",
+      "package": "shadcn",
+      "version": "latest",
+      "args": ["mcp"],
+      "_doc": "shadcn/ui registry MCP via the shadcn CLI's mcp subcommand. No auth required."
+    },
+    {
+      "name": "openspec",
+      "transport": "stdio_local",
+      "package": "openspec-mcp",
+      "version": "latest",
+      "_doc": "OpenSpec MCP. No auth required."
+    },
+    {
+      "name": "roxybrowser-openapi",
+      "transport": "stdio_local",
+      "package": "@roxybrowser/openapi",
+      "version": "latest",
+      "startup_timeout_sec": 60,
+      "env": {
+        "ROXY_API_HOST": "${ROXY_API_HOST:-http://127.0.0.1:50000}",
+        "ROXY_API_KEY":  "${ROXY_API_KEY}"
+      },
+      "_doc": "RoxyBrowser OpenAPI MCP. Requires ROXY_API_KEY from the RoxyBrowser desktop app (Settings -> API). ROXY_API_HOST defaults to the local app's port if not set."
+    },
+    {
+      "name": "roxybrowser-playwright-mcp",
+      "transport": "stdio_local",
+      "package": "@roxybrowser/playwright-mcp",
+      "version": "latest",
+      "startup_timeout_sec": 60,
+      "_doc": "RoxyBrowser Playwright MCP. Drives RoxyBrowser via Playwright. No auth required for the MCP itself; relies on the running RoxyBrowser instance."
+    },
+    {
+      "name": "ref-tools",
+      "transport": "http",
+      "url": "https://api.ref.tools/mcp",
+      "headers": {
+        "x-ref-api-key": "${REF_TOOLS_API_KEY}"
+      },
+      "_doc": "ref.tools hosted MCP for code/library reference lookup. Requires REF_TOOLS_API_KEY from https://ref.tools dashboard."
+    },
+    {
+      "name": "openaiDeveloperDocs",
+      "transport": "http",
+      "url": "https://developers.openai.com/mcp",
+      "_doc": "OpenAI developer-docs hosted MCP. No auth required."
     }
   ],
   "skills": [
