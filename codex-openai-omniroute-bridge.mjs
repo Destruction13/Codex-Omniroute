@@ -61,6 +61,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import os from "node:os";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
 
 // ----------------------------------------------------------------------------
 // Configuration
@@ -108,6 +109,9 @@ const OPENCODE_PROVIDER_NAMES = ["cloud_omni", "miracloud", "omniroute"];
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEX_BRIDGE_REQUEST_TIMEOUT_MS || "300000", 10);
 const LOG_LEVEL = (process.env.CODEX_BRIDGE_LOG_LEVEL || "info").toLowerCase();
+
+const APPLY_PATCH_TOOL_NAME = "apply_patch";
+const APPLY_PATCH_ARGUMENT_KEYS = ["input", "patch", "content", "text", "body", "arguments"];
 
 // Header allowlist for inbound -> outbound forwarding.
 const HOP_BY_HOP = new Set([
@@ -487,7 +491,153 @@ function applyGpt55Pin(jsonBody, provider) {
   return jsonBody;
 }
 
-function normalizeMainRequestBody(buf, provider) {
+// ----------------------------------------------------------------------------
+// Codex native/freeform apply_patch <-> OmniRoute function adapter
+// ----------------------------------------------------------------------------
+
+function createApplyPatchAdapterContext(suffix) {
+  return {
+    suffix,
+    requestHadAdaptedApplyPatch: false,
+    adaptedApplyPatchToolCount: 0,
+    originalApplyPatchTools: [],
+    applyPatchFunctionCallItemIds: new Set(),
+    applyPatchFunctionCallIds: new Set(),
+    applyPatchFunctionOutputIndexes: new Set(),
+    functionArgumentStateByKey: new Map(),
+  };
+}
+
+function isRecord(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function pickStringAtPaths(obj, paths) {
+  if (!isRecord(obj)) return null;
+  for (const pathParts of paths) {
+    let cur = obj;
+    for (const part of pathParts) {
+      if (!isRecord(cur) || !(part in cur)) {
+        cur = null;
+        break;
+      }
+      cur = cur[part];
+    }
+    if (typeof cur === "string" && cur.length > 0) return cur;
+  }
+  return null;
+}
+
+function getToolName(tool) {
+  return pickStringAtPaths(tool, [["name"], ["function", "name"], ["custom", "name"]]);
+}
+
+function getToolDescription(tool) {
+  return (
+    pickStringAtPaths(tool, [["description"], ["function", "description"], ["custom", "description"]]) ||
+    "Apply a patch to files in the current workspace."
+  );
+}
+
+function getToolType(tool) {
+  return pickStringAtPaths(tool, [["type"]]) || "";
+}
+
+function isApplyPatchCustomTool(tool) {
+  if (!isRecord(tool)) return false;
+  if (getToolName(tool) !== APPLY_PATCH_TOOL_NAME) return false;
+  const type = getToolType(tool).toLowerCase();
+  return type === "custom" || type === "custom_tool" || type === "freeform";
+}
+
+function makeApplyPatchFunctionParameters() {
+  return {
+    type: "object",
+    properties: {
+      input: {
+        type: "string",
+        description:
+          "The exact apply_patch patch text, including *** Begin Patch and *** End Patch.",
+      },
+    },
+    required: ["input"],
+    additionalProperties: false,
+  };
+}
+
+function rememberOriginalApplyPatchTool(ctx, tool, description) {
+  if (!ctx) return;
+  ctx.originalApplyPatchTools.push({
+    type: getToolType(tool),
+    name: getToolName(tool),
+    description,
+    format:
+      (isRecord(tool) && (tool.format || tool.input_format || tool.inputFormat)) ||
+      (isRecord(tool?.custom) && (tool.custom.format || tool.custom.input_format || tool.custom.inputFormat)) ||
+      null,
+  });
+}
+
+function rewriteApplyPatchToolForOmniRoute(tool, suffix, ctx) {
+  if (!isApplyPatchCustomTool(tool)) return tool;
+
+  const description = getToolDescription(tool);
+  const parameters = makeApplyPatchFunctionParameters();
+  const isChatCompletions = suffix.includes("chat/completions");
+  rememberOriginalApplyPatchTool(ctx, tool, description);
+  if (ctx) {
+    ctx.requestHadAdaptedApplyPatch = true;
+    ctx.adaptedApplyPatchToolCount += 1;
+  }
+
+  if (isChatCompletions) {
+    return {
+      type: "function",
+      function: {
+        name: APPLY_PATCH_TOOL_NAME,
+        description,
+        parameters,
+        strict: true,
+      },
+    };
+  }
+
+  return {
+    type: "function",
+    name: APPLY_PATCH_TOOL_NAME,
+    description,
+    parameters,
+    strict: true,
+  };
+}
+
+function rewriteApplyPatchToolChoiceForOmniRoute(toolChoice, suffix, ctx) {
+  if (!ctx?.requestHadAdaptedApplyPatch || !isRecord(toolChoice)) return toolChoice;
+  if (getToolName(toolChoice) !== APPLY_PATCH_TOOL_NAME) return toolChoice;
+
+  const type = getToolType(toolChoice).toLowerCase();
+  if (type && type !== "custom" && type !== "custom_tool" && type !== "freeform") {
+    return toolChoice;
+  }
+
+  if (suffix.includes("chat/completions")) {
+    return { type: "function", function: { name: APPLY_PATCH_TOOL_NAME } };
+  }
+  return { type: "function", name: APPLY_PATCH_TOOL_NAME };
+}
+
+function rewriteApplyPatchToolsForOmniRoute(parsed, suffix, ctx) {
+  if (!isRecord(parsed)) return parsed;
+  if (Array.isArray(parsed.tools)) {
+    parsed.tools = parsed.tools.map((tool) => rewriteApplyPatchToolForOmniRoute(tool, suffix, ctx));
+  }
+  if (parsed.tool_choice != null) {
+    parsed.tool_choice = rewriteApplyPatchToolChoiceForOmniRoute(parsed.tool_choice, suffix, ctx);
+  }
+  return parsed;
+}
+
+function normalizeMainRequestBody(buf, provider, applyPatchAdapterContext = null, suffix = "") {
   if (!buf || buf.length === 0) return buf;
   let parsed;
   try {
@@ -499,6 +649,7 @@ function normalizeMainRequestBody(buf, provider) {
     if (parsed.model) parsed.model = normalizeModelForOmniRoute(parsed.model, provider);
     parsed.store = false;
     parsed = applyGpt55Pin(parsed, provider);
+    parsed = rewriteApplyPatchToolsForOmniRoute(parsed, suffix, applyPatchAdapterContext);
   }
   return Buffer.from(JSON.stringify(parsed), "utf8");
 }
@@ -764,7 +915,408 @@ function pickHttpModule(target) {
   return target.protocol === "https:" ? https : http;
 }
 
-function forwardOutbound({ target, method, headers, bodyBuf, clientRes, isStreaming }) {
+function shouldTransformApplyPatchResponse(ctx) {
+  return Boolean(ctx?.requestHadAdaptedApplyPatch);
+}
+
+function rememberApplyPatchFunctionCall(ctx, obj) {
+  if (!ctx || !isRecord(obj)) return;
+  if (typeof obj.id === "string" && obj.id) ctx.applyPatchFunctionCallItemIds.add(obj.id);
+  if (typeof obj.item_id === "string" && obj.item_id) {
+    ctx.applyPatchFunctionCallItemIds.add(obj.item_id);
+  }
+  if (typeof obj.call_id === "string" && obj.call_id) ctx.applyPatchFunctionCallIds.add(obj.call_id);
+  if (Number.isInteger(obj.output_index)) {
+    ctx.applyPatchFunctionOutputIndexes.add(`output:${obj.output_index}`);
+  }
+  if (Number.isInteger(obj.index)) {
+    ctx.applyPatchFunctionOutputIndexes.add(`chat:${obj.index}`);
+  }
+}
+
+function objectTargetsKnownApplyPatchCall(ctx, obj) {
+  if (!ctx || !isRecord(obj)) return false;
+  if (typeof obj.id === "string" && ctx.applyPatchFunctionCallItemIds.has(obj.id)) return true;
+  if (typeof obj.item_id === "string" && ctx.applyPatchFunctionCallItemIds.has(obj.item_id)) {
+    return true;
+  }
+  if (typeof obj.call_id === "string" && ctx.applyPatchFunctionCallIds.has(obj.call_id)) return true;
+  if (
+    Number.isInteger(obj.output_index) &&
+    ctx.applyPatchFunctionOutputIndexes.has(`output:${obj.output_index}`)
+  ) {
+    return true;
+  }
+  if (
+    Number.isInteger(obj.index) &&
+    ctx.applyPatchFunctionOutputIndexes.has(`chat:${obj.index}`)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function objectNamesApplyPatchFunctionCall(obj) {
+  if (!isRecord(obj)) return false;
+  const type = typeof obj.type === "string" ? obj.type : "";
+  if (type !== "function_call" && type !== "function") return false;
+  return getToolName(obj) === APPLY_PATCH_TOOL_NAME;
+}
+
+function pickApplyPatchInputFromObject(obj) {
+  if (!isRecord(obj)) return null;
+  for (const key of APPLY_PATCH_ARGUMENT_KEYS) {
+    const value = obj[key];
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+function decodeJsonStringPrefix(src) {
+  let out = "";
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i];
+    if (ch === '"') return out;
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    i += 1;
+    if (i >= src.length) return out;
+    const esc = src[i];
+    if (esc === '"' || esc === "\\" || esc === "/") out += esc;
+    else if (esc === "b") out += "\b";
+    else if (esc === "f") out += "\f";
+    else if (esc === "n") out += "\n";
+    else if (esc === "r") out += "\r";
+    else if (esc === "t") out += "\t";
+    else if (esc === "u") {
+      const hex = src.slice(i + 1, i + 5);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) return out;
+      out += String.fromCharCode(parseInt(hex, 16));
+      i += 4;
+    } else {
+      out += esc;
+    }
+  }
+  return out;
+}
+
+function extractPartialJsonStringProperty(jsonText) {
+  for (const key of APPLY_PATCH_ARGUMENT_KEYS) {
+    const needle = JSON.stringify(key);
+    const keyIndex = jsonText.indexOf(needle);
+    if (keyIndex < 0) continue;
+    let i = keyIndex + needle.length;
+    while (i < jsonText.length && /\s/.test(jsonText[i])) i += 1;
+    if (jsonText[i] !== ":") continue;
+    i += 1;
+    while (i < jsonText.length && /\s/.test(jsonText[i])) i += 1;
+    if (jsonText[i] !== '"') continue;
+    return decodeJsonStringPrefix(jsonText.slice(i + 1));
+  }
+  return null;
+}
+
+function extractApplyPatchInputFromFunctionArguments(value, { partial = false } = {}) {
+  if (value == null) return "";
+  if (isRecord(value)) {
+    const picked = pickApplyPatchInputFromObject(value);
+    return picked ?? safeStringify(value);
+  }
+  if (typeof value !== "string") return String(value);
+
+  const trimmed = value.trimStart();
+  if (!trimmed) return "";
+  if (trimmed.startsWith("*** Begin Patch")) return value;
+
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "string") return parsed;
+    if (isRecord(parsed)) {
+      const picked = pickApplyPatchInputFromObject(parsed);
+      return picked ?? safeStringify(parsed);
+    }
+    return parsed == null ? "" : String(parsed);
+  } catch {
+    const partialValue = extractPartialJsonStringProperty(value);
+    if (partialValue != null) return partialValue;
+    if (partial && (trimmed.startsWith("{") || trimmed.startsWith("[") || trimmed.startsWith('"'))) {
+      return null;
+    }
+    return value;
+  }
+}
+
+function functionArgumentStateKey(event) {
+  if (typeof event.id === "string" && event.id) return `item:${event.id}`;
+  if (typeof event.item_id === "string" && event.item_id) return `item:${event.item_id}`;
+  if (typeof event.call_id === "string" && event.call_id) return `call:${event.call_id}`;
+  if (Number.isInteger(event.output_index)) return `output:${event.output_index}`;
+  if (Number.isInteger(event.index)) return `chat:${event.index}`;
+  return "default";
+}
+
+function getFunctionArgumentState(ctx, event) {
+  const key = functionArgumentStateKey(event);
+  let state = ctx.functionArgumentStateByKey.get(key);
+  if (!state) {
+    state = { raw: "", emittedInput: "" };
+    ctx.functionArgumentStateByKey.set(key, state);
+  }
+  return state;
+}
+
+function transformApplyPatchFunctionArgumentsDelta(event, ctx) {
+  const state = getFunctionArgumentState(ctx, event);
+  state.raw += typeof event.delta === "string" ? event.delta : "";
+  const input = extractApplyPatchInputFromFunctionArguments(state.raw, { partial: true });
+  let delta = "";
+  if (typeof input === "string") {
+    delta = input.startsWith(state.emittedInput) ? input.slice(state.emittedInput.length) : input;
+    state.emittedInput = input;
+  }
+
+  const out = { ...event, type: "response.custom_tool_call_input.delta", delta };
+  delete out.arguments;
+  return out;
+}
+
+function transformApplyPatchFunctionArgumentsDone(event, ctx) {
+  const state = getFunctionArgumentState(ctx, event);
+  const rawArgs = typeof event.arguments === "string" ? event.arguments : state.raw;
+  const input = extractApplyPatchInputFromFunctionArguments(rawArgs);
+  state.raw = rawArgs || state.raw;
+  state.emittedInput = input;
+
+  const out = { ...event, type: "response.custom_tool_call_input.done", input };
+  delete out.arguments;
+  delete out.delta;
+  return out;
+}
+
+function transformApplyPatchResponseItem(item, ctx) {
+  if (!isRecord(item)) return item;
+  if (!objectNamesApplyPatchFunctionCall(item) && !objectTargetsKnownApplyPatchCall(ctx, item)) {
+    return item;
+  }
+  rememberApplyPatchFunctionCall(ctx, item);
+  const input = extractApplyPatchInputFromFunctionArguments(item.arguments ?? item.input ?? "");
+  const out = { ...item, type: "custom_tool_call", name: APPLY_PATCH_TOOL_NAME, input };
+  delete out.arguments;
+  delete out.parsed_arguments;
+  delete out.function;
+  return out;
+}
+
+function transformApplyPatchChatToolCall(toolCall, ctx, { partial = false } = {}) {
+  if (!isRecord(toolCall)) return toolCall;
+  const functionObj = isRecord(toolCall.function) ? toolCall.function : {};
+  const isApplyPatch =
+    (toolCall.type === "function" && functionObj.name === APPLY_PATCH_TOOL_NAME) ||
+    objectTargetsKnownApplyPatchCall(ctx, toolCall);
+  if (!isApplyPatch) return toolCall;
+
+  rememberApplyPatchFunctionCall(ctx, toolCall);
+  const state = getFunctionArgumentState(ctx, toolCall);
+  state.raw += typeof functionObj.arguments === "string" ? functionObj.arguments : "";
+  const input = extractApplyPatchInputFromFunctionArguments(state.raw, { partial });
+  const emittedInput =
+    typeof input === "string" && partial && input.startsWith(state.emittedInput)
+      ? input.slice(state.emittedInput.length)
+      : input ?? "";
+  if (typeof input === "string") state.emittedInput = input;
+
+  const out = {
+    ...toolCall,
+    type: "custom",
+    custom: {
+      name: APPLY_PATCH_TOOL_NAME,
+      input: emittedInput,
+    },
+  };
+  delete out.function;
+  return out;
+}
+
+function transformApplyPatchChatChoice(choice, ctx) {
+  if (!isRecord(choice)) return choice;
+  if (isRecord(choice.delta) && Array.isArray(choice.delta.tool_calls)) {
+    choice.delta = {
+      ...choice.delta,
+      tool_calls: choice.delta.tool_calls.map((toolCall) =>
+        transformApplyPatchChatToolCall(toolCall, ctx, { partial: true }),
+      ),
+    };
+  }
+  if (isRecord(choice.message) && Array.isArray(choice.message.tool_calls)) {
+    choice.message = {
+      ...choice.message,
+      tool_calls: choice.message.tool_calls.map((toolCall) =>
+        transformApplyPatchChatToolCall(toolCall, ctx),
+      ),
+    };
+  }
+  return choice;
+}
+
+function transformApplyPatchStreamingEvent(event, ctx) {
+  if (!isRecord(event) || typeof event.type !== "string") return event;
+
+  if (isRecord(event.item)) {
+    const transformedItem = transformApplyPatchResponseItem(event.item, ctx);
+    if (transformedItem !== event.item) event = { ...event, item: transformedItem };
+  }
+
+  if (
+    event.type === "response.function_call_arguments.delta" &&
+    objectTargetsKnownApplyPatchCall(ctx, event)
+  ) {
+    return transformApplyPatchFunctionArgumentsDelta(event, ctx);
+  }
+
+  if (
+    event.type === "response.function_call_arguments.done" &&
+    objectTargetsKnownApplyPatchCall(ctx, event)
+  ) {
+    return transformApplyPatchFunctionArgumentsDone(event, ctx);
+  }
+
+  return event;
+}
+
+function transformApplyPatchResponseObject(value, ctx) {
+  if (!shouldTransformApplyPatchResponse(ctx)) return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => transformApplyPatchResponseObject(entry, ctx));
+  }
+  if (!isRecord(value)) return value;
+
+  let out = value;
+  if (typeof out.type === "string") {
+    out = transformApplyPatchStreamingEvent(out, ctx);
+  }
+  if (Array.isArray(out.output)) {
+    out = { ...out, output: out.output.map((item) => transformApplyPatchResponseItem(item, ctx)) };
+  }
+  if (isRecord(out.response)) {
+    out = { ...out, response: transformApplyPatchResponseObject(out.response, ctx) };
+  }
+  if (Array.isArray(out.choices)) {
+    out = {
+      ...out,
+      choices: out.choices.map((choice) => transformApplyPatchChatChoice(choice, ctx)),
+    };
+  }
+  return out;
+}
+
+function isSseContentType(contentType) {
+  return String(contentType || "").toLowerCase().includes("text/event-stream");
+}
+
+function isJsonContentType(contentType) {
+  return String(contentType || "").toLowerCase().includes("application/json");
+}
+
+function sseLineValue(line, prefix) {
+  let value = line.slice(prefix.length);
+  if (value.startsWith(" ")) value = value.slice(1);
+  return value;
+}
+
+function transformSseBlock(block, ctx) {
+  if (!block) return "\n\n";
+  const lines = block.split(/\r?\n/);
+  const passthrough = [];
+  const dataParts = [];
+  let eventName = null;
+
+  for (const line of lines) {
+    if (line.startsWith("event:")) {
+      eventName = sseLineValue(line, "event:");
+    } else if (line.startsWith("data:")) {
+      dataParts.push(sseLineValue(line, "data:"));
+    } else {
+      passthrough.push(line);
+    }
+  }
+
+  if (dataParts.length === 0) return block + "\n\n";
+  const data = dataParts.join("\n");
+  if (data.trim() === "[DONE]") return block + "\n\n";
+
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return block + "\n\n";
+  }
+
+  const transformed = transformApplyPatchResponseObject(parsed, ctx);
+  const transformedEventName =
+    isRecord(transformed) && typeof transformed.type === "string" ? transformed.type : eventName;
+  const outLines = passthrough.filter((line) => line.length > 0 || passthrough.length === 1);
+  if (transformedEventName) outLines.push(`event: ${transformedEventName}`);
+  outLines.push(`data: ${JSON.stringify(transformed)}`);
+  return outLines.join("\n") + "\n\n";
+}
+
+function pipeSseWithApplyPatchTransform(upstreamRes, clientRes, ctx) {
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+
+  function flushPending(final = false) {
+    while (true) {
+      const match = /\r?\n\r?\n/.exec(pending);
+      if (!match) break;
+      const block = pending.slice(0, match.index);
+      pending = pending.slice(match.index + match[0].length);
+      clientRes.write(transformSseBlock(block, ctx));
+    }
+    if (final && pending.length > 0) {
+      clientRes.write(transformSseBlock(pending, ctx));
+      pending = "";
+    }
+  }
+
+  upstreamRes.on("data", (chunk) => {
+    pending += decoder.write(chunk);
+    flushPending(false);
+  });
+  upstreamRes.on("end", () => {
+    pending += decoder.end();
+    flushPending(true);
+    clientRes.end();
+  });
+}
+
+function pipeJsonWithApplyPatchTransform(upstreamRes, clientRes, ctx) {
+  const chunks = [];
+  upstreamRes.on("data", (chunk) => chunks.push(chunk));
+  upstreamRes.on("end", () => {
+    const body = Buffer.concat(chunks);
+    let parsed;
+    try {
+      parsed = JSON.parse(body.toString("utf8"));
+    } catch {
+      clientRes.end(body);
+      return;
+    }
+    const transformed = transformApplyPatchResponseObject(parsed, ctx);
+    clientRes.end(Buffer.from(JSON.stringify(transformed), "utf8"));
+  });
+}
+
+function forwardOutbound({
+  target,
+  method,
+  headers,
+  bodyBuf,
+  clientRes,
+  isStreaming,
+  responseAdapterContext = null,
+}) {
   const mod = pickHttpModule(target);
   const upstreamReq = mod.request(
     {
@@ -781,8 +1333,20 @@ function forwardOutbound({ target, method, headers, bodyBuf, clientRes, isStream
         if (HOP_BY_HOP.has(k.toLowerCase())) continue;
         if (v != null) clientRes.setHeader(k, v);
       }
-      upstreamRes.on("data", (chunk) => clientRes.write(chunk));
-      upstreamRes.on("end", () => clientRes.end());
+      if (shouldTransformApplyPatchResponse(responseAdapterContext)) {
+        const contentType = upstreamRes.headers["content-type"];
+        if (isSseContentType(contentType)) {
+          pipeSseWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
+        } else if (isJsonContentType(contentType)) {
+          pipeJsonWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
+        } else {
+          upstreamRes.on("data", (chunk) => clientRes.write(chunk));
+          upstreamRes.on("end", () => clientRes.end());
+        }
+      } else {
+        upstreamRes.on("data", (chunk) => clientRes.write(chunk));
+        upstreamRes.on("end", () => clientRes.end());
+      }
       upstreamRes.on("error", (err) => {
         log("error", "upstream response error", err?.message);
         if (!clientRes.headersSent) {
@@ -920,7 +1484,8 @@ async function handleOmniRoutePost(req, res, suffix) {
     res.end(JSON.stringify({ error: "bad_request_encoding", detail: err?.message }));
     return;
   }
-  const bodyBuf = normalizeMainRequestBody(raw, provider);
+  const applyPatchAdapterContext = createApplyPatchAdapterContext(suffix);
+  const bodyBuf = normalizeMainRequestBody(raw, provider, applyPatchAdapterContext, suffix);
   let toolDiagnostic = null;
   try {
     toolDiagnostic = await summarizeReasoningRequestTools(bodyBuf, suffix, req.headers);
@@ -950,11 +1515,26 @@ async function handleOmniRoutePost(req, res, suffix) {
       `mcp_heuristic=${heuristicMatched}`,
       `mcp_heuristic_count=${toolDiagnostic.mcp_shaped_tool_count_heuristic}`,
       `tool_search=${toolDiagnostic.has_tool_search}`,
+      `apply_patch_adapter=${applyPatchAdapterContext.adaptedApplyPatchToolCount}`,
     );
   } else {
-    log("info", "omniroute ->", target.href, `bytes=${bodyBuf.length}`);
+    log(
+      "info",
+      "omniroute ->",
+      target.href,
+      `bytes=${bodyBuf.length}`,
+      `apply_patch_adapter=${applyPatchAdapterContext.adaptedApplyPatchToolCount}`,
+    );
   }
-  forwardOutbound({ target, method: "POST", headers, bodyBuf, clientRes: res, isStreaming: true });
+  forwardOutbound({
+    target,
+    method: "POST",
+    headers,
+    bodyBuf,
+    clientRes: res,
+    isStreaming: true,
+    responseAdapterContext: applyPatchAdapterContext,
+  });
 }
 
 async function handleOfficialPassthrough(req, res, suffixOverride) {
