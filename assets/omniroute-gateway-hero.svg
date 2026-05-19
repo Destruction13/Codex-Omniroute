@@ -1,0 +1,120 @@
+<svg width="1440" height="620" viewBox="0 0 1440 620" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Codex OmniRoute shared-home gateway</title>
+  <desc id="desc">A visual diagram showing Official Codex and Codex OmniRoute sharing one .codex home while only OmniRoute reasoning routes through the local bridge.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1440" y2="620" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07111F"/>
+      <stop offset="0.42" stop-color="#172554"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <radialGradient id="auroraA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(230 70) rotate(27) scale(520 260)">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity="0.68"/>
+      <stop offset="0.52" stop-color="#6366F1" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#6366F1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="auroraB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1190 115) rotate(147) scale(520 310)">
+      <stop offset="0" stop-color="#A78BFA" stop-opacity="0.64"/>
+      <stop offset="0.55" stop-color="#14B8A6" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#14B8A6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="lineA" x1="290" y1="315" x2="1150" y2="315" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="0.5" stop-color="#A78BFA"/>
+      <stop offset="1" stop-color="#34D399"/>
+    </linearGradient>
+    <linearGradient id="cardStroke" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#67E8F9" stop-opacity="0.8"/>
+      <stop offset="0.5" stop-color="#A78BFA" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#34D399" stop-opacity="0.65"/>
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#06B6D4"/>
+      <stop offset="0.5" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#10B981"/>
+    </linearGradient>
+    <filter id="softShadow" x="-30%" y="-35%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.45 0 0 0 0 0.85 0 0 0 0 1 0 0 0 0.55 0"/>
+      <feBlend in2="SourceGraphic" mode="screen"/>
+    </filter>
+  </defs>
+
+  <rect width="1440" height="620" rx="44" fill="url(#bg)"/>
+  <rect width="1440" height="620" rx="44" fill="url(#auroraA)"/>
+  <rect width="1440" height="620" rx="44" fill="url(#auroraB)"/>
+  <path d="M-30 501C146 429 290 455 450 504C620 555 742 574 934 499C1117 427 1270 429 1480 506V620H-30V501Z" fill="#020617" fill-opacity="0.34"/>
+  <path d="M99 142C239 75 404 100 561 154C724 210 880 252 1046 171C1181 105 1302 102 1395 139" stroke="#93C5FD" stroke-opacity="0.16" stroke-width="2"/>
+  <path d="M99 486C249 432 375 431 523 471C694 517 853 529 1030 453C1172 393 1298 404 1395 458" stroke="#5EEAD4" stroke-opacity="0.16" stroke-width="2"/>
+
+  <text x="720" y="88" text-anchor="middle" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="0">
+    Codex OmniRoute
+  </text>
+  <text x="720" y="126" text-anchor="middle" fill="#C7D2FE" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="500" letter-spacing="0">
+    Your Codex tools, history, and connectors stay with you.
+  </text>
+
+  <g filter="url(#softShadow)">
+    <rect x="96" y="205" width="268" height="222" rx="24" fill="#0F172A" fill-opacity="0.82" stroke="url(#cardStroke)" stroke-width="1.4"/>
+    <rect x="119" y="228" width="80" height="80" rx="22" fill="#111827" stroke="#67E8F9" stroke-opacity="0.5"/>
+    <path d="M145 268C145 250.3 159.3 236 177 236C194.7 236 209 250.3 209 268C209 285.7 194.7 300 177 300C159.3 300 145 285.7 145 268Z" fill="#22D3EE" fill-opacity="0.18"/>
+    <path d="M159 254H182C190.3 254 197 260.7 197 269C197 277.3 190.3 284 182 284H159V254Z" stroke="#A5F3FC" stroke-width="5" stroke-linejoin="round"/>
+    <text x="119" y="337" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="26" font-weight="800">Official Codex</text>
+    <text x="119" y="369" fill="#CBD5E1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Normal app. Normal auth.</text>
+    <text x="119" y="393" fill="#CBD5E1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">No OmniRoute overrides.</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect x="1076" y="205" width="268" height="222" rx="24" fill="#0F172A" fill-opacity="0.82" stroke="url(#cardStroke)" stroke-width="1.4"/>
+    <rect x="1099" y="228" width="80" height="80" rx="22" fill="#111827" stroke="#34D399" stroke-opacity="0.55"/>
+    <path d="M1125 270L1143 250L1162 270L1143 290L1125 270Z" fill="#34D399" fill-opacity="0.22" stroke="#A7F3D0" stroke-width="5" stroke-linejoin="round"/>
+    <path d="M1143 250V236M1143 304V290M1162 270H1176M1110 270H1125" stroke="#A7F3D0" stroke-width="5" stroke-linecap="round"/>
+    <text x="1099" y="337" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="26" font-weight="800">Codex OmniRoute</text>
+    <text x="1099" y="369" fill="#CBD5E1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Separate desktop window.</text>
+    <text x="1099" y="393" fill="#CBD5E1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">Reasoning goes through bridge.</text>
+  </g>
+
+  <g filter="url(#softShadow)">
+    <rect x="466" y="182" width="508" height="268" rx="30" fill="#020617" fill-opacity="0.7" stroke="#A78BFA" stroke-opacity="0.62" stroke-width="1.4"/>
+    <rect x="506" y="218" width="428" height="64" rx="18" fill="url(#button)" fill-opacity="0.95"/>
+    <text x="720" y="259" text-anchor="middle" fill="white" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="25" font-weight="850">
+      Your Codex workspace
+    </text>
+    <text x="720" y="317" text-anchor="middle" fill="#E0E7FF" font-family="JetBrains Mono, Consolas, monospace" font-size="20" font-weight="700">
+      %USERPROFILE%\.codex
+    </text>
+    <text x="720" y="354" text-anchor="middle" fill="#CBD5E1" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="16">
+      auth · history · MCP · plugins · connectors · sessions
+    </text>
+    <rect x="547" y="383" width="346" height="38" rx="19" fill="#111827" stroke="#38BDF8" stroke-opacity="0.45"/>
+    <text x="720" y="407" text-anchor="middle" fill="#BAE6FD" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700">
+      same setup in both windows
+    </text>
+  </g>
+
+  <path d="M365 315H452" stroke="url(#lineA)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M988 315H1075" stroke="url(#lineA)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+  <path d="M448 315L426 302V328L448 315Z" fill="#67E8F9"/>
+  <path d="M1072 315L1050 302V328L1072 315Z" fill="#34D399"/>
+
+  <g filter="url(#softShadow)">
+    <rect x="509" y="486" width="422" height="76" rx="23" fill="#111827" fill-opacity="0.84" stroke="#67E8F9" stroke-opacity="0.42"/>
+    <text x="720" y="517" text-anchor="middle" fill="#F8FAFC" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800">
+      Local OmniRoute bridge
+    </text>
+    <text x="720" y="544" text-anchor="middle" fill="#CBD5E1" font-family="JetBrains Mono, Consolas, monospace" font-size="15">
+      127.0.0.1:20333/v1
+    </text>
+  </g>
+
+  <path d="M1210 427C1210 504 1064 524 934 524" stroke="#34D399" stroke-opacity="0.5" stroke-width="3" stroke-dasharray="10 12" stroke-linecap="round"/>
+  <path d="M230 427C230 504 376 524 506 524" stroke="#67E8F9" stroke-opacity="0.28" stroke-width="3" stroke-dasharray="10 12" stroke-linecap="round"/>
+  <text x="1210" y="472" text-anchor="middle" fill="#BBF7D0" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">
+    main reasoning
+  </text>
+  <text x="230" y="472" text-anchor="middle" fill="#BAE6FD" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700">
+    voice + compact stay official
+  </text>
+</svg>

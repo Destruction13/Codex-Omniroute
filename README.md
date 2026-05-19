@@ -1,170 +1,192 @@
-# Codex OmniRoute
+<!--
+  Codex OmniRoute README
+  Public landing page first, technical reference second.
+-->
 
-Codex OmniRoute запускает официальный Codex Desktop через локальный шлюз
-OmniRoute. Обычный Codex остаётся обычным, а окно **Codex OmniRoute**
-направляет основные reasoning-запросы через локальный мост.
+<div align="center">
 
-Главная идея простая: оба режима используют один официальный дом Codex:
+<a href="#quick-start">
+  <img src="assets/omniroute-gateway-hero.svg" alt="Codex OmniRoute shared-home gateway diagram" width="100%" />
+</a>
 
-```text
-C:\Users\<you>\.codex
-```
+<h1>Codex OmniRoute</h1>
 
-Значит, авторизация, история чатов, MCP-серверы, плагины, коннекторы,
-кэш моделей, tool discovery и сессии остаются общими с официальным Codex.
-Отдельный `.codex-omniroute-home` больше не используется как активный
-`CODEX_HOME`.
+<p>
+  <b>Официальный Codex остаётся официальным.</b><br />
+  <b>Codex OmniRoute</b> открывается отдельным окном и гонит reasoning через
+  OmniRoute bridge, а твои MCP, плагины, коннекторы и история остаются на месте.
+</p>
 
-## Быстрая установка
+<p>
+  <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
+  <img src="https://img.shields.io/badge/Codex-Official%20Desktop-111827?style=for-the-badge" alt="Official Codex Desktop" />
+  <img src="https://img.shields.io/badge/Setup.exe-One%20Run-8B5CF6?style=for-the-badge" alt="One run setup" />
+  <img src="https://img.shields.io/badge/CODEX_HOME-Shared-10B981?style=for-the-badge" alt="Shared CODEX_HOME" />
+  <img src="https://img.shields.io/badge/MCP%20%2B%20Plugins-Ready-14B8A6?style=for-the-badge" alt="MCP and plugins ready" />
+</p>
 
-Этот путь рассчитан на обычную Windows-машину, где уже установлен
-официальный Codex Desktop.
+<p>
+  <a href="https://github.com/Destruction13/Codex-Omniroute/archive/refs/heads/main.zip">
+    <img src="https://img.shields.io/badge/Download-ZIP-2563EB?style=for-the-badge&logo=github&logoColor=white" alt="Download ZIP" />
+  </a>
+  <a href="#quick-start">
+    <img src="https://img.shields.io/badge/Quick%20Start-Setup.exe-F97316?style=for-the-badge" alt="Quick start" />
+  </a>
+  <a href="#troubleshooting">
+    <img src="https://img.shields.io/badge/Help-Fix%20It-DC2626?style=for-the-badge" alt="Help" />
+  </a>
+  <a href="#under-the-hood">
+    <img src="https://img.shields.io/badge/Architecture-Read%20More-059669?style=for-the-badge" alt="Architecture" />
+  </a>
+</p>
 
-1. Установи официальный **OpenAI Codex** из Microsoft Store.
-2. Открой официальный Codex хотя бы один раз и войди в аккаунт.
-3. Скачай этот репозиторий с GitHub:
-   - через **Code** -> **Download ZIP**;
-   - или через `git clone`.
-4. Распакуй проект в понятную папку, например:
+</div>
 
-   ```text
-   C:\AI\Bots\Codex-Omniroute
-   ```
+---
 
-5. Запусти `Setup.exe` из папки проекта.
+<a id="what-this-is"></a>
 
-   В PowerShell это выглядит так:
+## Что это
 
-   ```powershell
-   .\Setup.exe
-   ```
+Codex OmniRoute — это Windows-шлюз для Codex Desktop. Он оставляет один
+официальный Codex home и меняет только способ запуска окна OmniRoute.
 
-6. Если setup попросит данные OmniRoute, введи:
-   - base URL, например `https://your-omniroute.example/v1`;
-   - API key для OmniRoute;
-   - optional image API key, если изображения идут через отдельный ключ.
+<table>
+<tr>
+<td width="33%" align="center">
+<h3>Один общий Codex home</h3>
+<p>
+Auth, история чатов, MCP config, plugins, connectors, sessions и model cache
+остаются в <code>%USERPROFILE%\.codex</code>.
+</p>
+</td>
+<td width="33%" align="center">
+<h3>Два desktop-режима</h3>
+<p>
+Запускай обычный Codex, когда нужен официальный режим. Запускай Codex
+OmniRoute, когда reasoning должен идти через OmniRoute.
+</p>
+</td>
+<td width="33%" align="center">
+<h3>Твои tools на месте</h3>
+<p>
+Всё, что уже настроено в официальном Codex, доступно и в OmniRoute-окне:
+MCP, plugins, connectors, sessions и model cache.
+</p>
+</td>
+</tr>
+</table>
 
-7. После завершения запускай **Codex OmniRoute** с рабочего стола или из
-   меню **Start**.
+> **Важно:** Это не клон Codex. Нужен установленный официальный OpenAI Codex
+> Desktop, в котором ты уже вошёл в аккаунт.
 
-Официальный Codex при этом остаётся доступен отдельно: через обычный ярлык
-Codex или через ярлык **Codex Official**, который создаёт setup.
+<a id="quick-start"></a>
 
-> **Note:** `Setup.exe` не подписан сертификатом издателя. Если Windows
-> SmartScreen покажет предупреждение, открой **More info** и выбери
-> **Run anyway**, если ты доверяешь локальной копии репозитория.
+## Быстрый старт
 
-## Что делает `Setup.exe`
+Это нормальный путь для свежей Windows-машины, где уже стоит официальный Codex
+Desktop.
 
-`Setup.exe` нужен, чтобы пользователь не собирал окружение руками. Он
-использует встроенный Windows PowerShell и выполняет установку в user-space,
-без глобального патчинга Codex.
-
-Во время установки setup:
-
-- проверяет, что официальный Codex Desktop установлен;
-- ставит локальный Node.js и локальный .NET SDK в
-  `%LOCALAPPDATA%\CodexOmniRoute\deps`, если они нужны;
-- создаёт или обновляет `omniroute-provider.json`;
-- готовит отдельную копию Electron-приложения в
-  `%LOCALAPPDATA%\CodexOmniRoute\WindowsApp`;
-- хранит отдельное состояние окна OmniRoute в
-  `%LOCALAPPDATA%\CodexOmniRoute\ElectronUserData`;
-- собирает маленький `app-server` wrapper для OmniRoute-окна;
-- создаёт ярлыки **Codex OmniRoute** и **Codex Official**;
-- запускает verifier, который проверяет shared-home gateway.
-
-Setup не пишет глобальный `model_provider = "omniroute"` в общий
-`config.toml` и не переключает официальный Codex на OmniRoute.
-
-## Что должно получиться
-
-После установки у тебя есть два режима:
-
-- **Codex Official**: обычный официальный Codex без OmniRoute overrides.
-- **Codex OmniRoute**: отдельное окно Codex, где основные reasoning-запросы
-  идут через локальный OmniRoute bridge.
-
-Оба режима читают один и тот же Codex home:
-
-```text
-%USERPROFILE%\.codex
-```
-
-Поэтому в OmniRoute-окне должны быть видны те же MCP-серверы, плагины,
-коннекторы, auth state, история и кэш, что и в официальном Codex.
-
-## Проверка установки
-
-Обычный пользователь может просто запустить **Codex OmniRoute** и отправить
-сообщение в окно. Если окно отвечает, базовый сценарий работает.
-
-Для технической проверки запусти:
-
-```powershell
-.\verify-codex-omniroute.ps1
-```
-
-Для более глубокой проверки всех MCP из общего Codex config:
+<table>
+<tr>
+<td width="8%" align="center"><b>1</b></td>
+<td>
+<b>Установи официальный OpenAI Codex.</b><br />
+Возьми Codex из Microsoft Store, открой его один раз и войди в аккаунт.
+</td>
+</tr>
+<tr>
+<td align="center"><b>2</b></td>
+<td>
+<b>Скачай этот репозиторий.</b><br />
+Нажми кнопку сверху или выполни:
 
 ```powershell
-.\verify-codex-omniroute.ps1 -ProbeAllMcp
+git clone https://github.com/Destruction13/Codex-Omniroute.git
 ```
+</td>
+</tr>
+<tr>
+<td align="center"><b>3</b></td>
+<td>
+<b>Запусти setup.</b><br />
+Открой PowerShell в папке проекта и выполни:
 
-Когда OmniRoute запущен, диагностика моста доступна здесь:
+```powershell
+.\Setup.exe
+```
+</td>
+</tr>
+<tr>
+<td align="center"><b>4</b></td>
+<td>
+<b>Введи OmniRoute credentials.</b><br />
+Когда setup спросит, вставь OmniRoute base URL и API key. Если image gateway
+использует отдельный ключ, введи и его.
+</td>
+</tr>
+<tr>
+<td align="center"><b>5</b></td>
+<td>
+<b>Запусти Codex OmniRoute.</b><br />
+Используй ярлык на рабочем столе или ярлык в меню Start.
+</td>
+</tr>
+</table>
+
+> **Важно:** `Setup.exe` не подписан publisher-сертификатом. Если Windows
+> SmartScreen откроет предупреждение, выбери **More info**, затем
+> **Run anyway**, только если доверяешь этой локальной копии.
+
+## Что делает setup
+
+`Setup.exe` нужен, чтобы обычный пользователь не собирал окружение руками. Он
+готовит OmniRoute как установленный продукт: зависимости, конфиг, ярлыки и
+проверку запуска.
+
+| Шаг | Результат |
+| --- | --- |
+| Проверяет официальный Codex | Убеждается, что официальный Desktop app установлен и готов. |
+| Ставит зависимости | Сам ставит локальные Node.js и .NET SDK, если их нет. |
+| Спрашивает OmniRoute доступ | Сохраняет base URL и API key в локальный config. |
+| Готовит отдельное окно | Создаёт рабочий запуск **Codex OmniRoute** рядом с официальным Codex. |
+| Создаёт ярлыки | Добавляет **Codex OmniRoute** и **Codex Official** на рабочий стол и в Start Menu. |
+| Проверяет запуск | Запускает verifier и показывает, что bridge, MCP и tools видны. |
+
+Setup не переключает обычный Codex на OmniRoute. Официальный Codex остаётся
+отдельным и запускается как раньше.
+
+## Что нажимать после setup
+
+После установки пользуйся этими входами.
+
+| Что нужно | Что открыть |
+| --- | --- |
+| Codex с OmniRoute reasoning | **Codex OmniRoute** |
+| Обычный официальный Codex | **Codex Official** или обычный ярлык Codex |
+| Остановить OmniRoute helpers | `.\Start-Codex-OmniRoute.ps1 -Restore` |
+| Проверить установку | `.\verify-codex-omniroute.ps1` |
+| Глубоко проверить MCP | `.\verify-codex-omniroute.ps1 -ProbeAllMcp` |
+
+Когда OmniRoute запущен, диагностика bridge доступна здесь:
 
 ```text
 http://127.0.0.1:20333/healthz
 ```
 
-В поле `main_reasoning_hits` видно, приходили ли реальные reasoning-запросы
-из Codex Desktop в OmniRoute bridge.
+Поле `main_reasoning_hits` растёт, когда реальное сообщение из Codex Desktop
+доходит до OmniRoute bridge.
 
-## Обновление
+## Конфиг провайдера
 
-Чтобы обновить проект, замени файлы репозитория новой версией и снова запусти:
-
-```powershell
-.\Setup.exe
-```
-
-Setup можно запускать повторно. Он обновит gateway, wrapper и ярлыки без
-переноса истории, auth или MCP-конфига в отдельный профиль.
-
-## Если что-то пошло не так
-
-Начни с мягкого восстановления:
-
-```powershell
-.\Start-Codex-OmniRoute.ps1 -Restore
-```
-
-Эта команда останавливает управляемый bridge и окно OmniRoute. Общий
-`%USERPROFILE%\.codex` она не удаляет.
-
-Типовые проблемы:
-
-- **Setup пишет, что официальный Codex не установлен.** Установи Codex из
-  Microsoft Store, открой его один раз, войди в аккаунт, затем снова запусти
-  `Setup.exe`.
-- **Setup просит OmniRoute base URL или API key.** Введи значения вручную
-  или заранее создай `omniroute-provider.json` рядом с `Setup.exe`.
-- **Один MCP показывает `auth_required`.** Это значит, что MCP есть в общем
-  Codex config, но ему не хватает токена или OAuth-доступа. Настрой ключи в
-  обычном Codex home, потому что OmniRoute использует тот же shared home.
-- **OmniRoute не отвечает.** Запусти `.\verify-codex-omniroute.ps1` и посмотри
-  `bridge.log`, если файл появился после запуска launcher.
-
-## Настройка провайдера вручную
-
-Setup обычно сам создаёт `omniroute-provider.json`. Если хочешь сделать это
-руками, скопируй пример:
+Setup умеет создать `omniroute-provider.json` интерактивно. Если хочешь
+сделать это руками, скопируй пример и заполни свои значения.
 
 ```powershell
 Copy-Item .\omniroute-provider.example.json .\omniroute-provider.json
 ```
 
-Затем заполни:
+Минимальная форма:
 
 ```json
 {
@@ -180,92 +202,87 @@ Copy-Item .\omniroute-provider.example.json .\omniroute-provider.json
 }
 ```
 
-Не коммить `omniroute-provider.json`: в нём лежат локальные ключи.
+Не публикуй `omniroute-provider.json`. В нём локальные credentials.
 
-## Ручной запуск
+<a id="troubleshooting"></a>
 
-Обычно достаточно ярлыка **Codex OmniRoute**. Эти команды нужны для
-диагностики и разработки.
+## Если что-то пошло не так
 
-Установить или проверить локальные зависимости:
-
-```powershell
-.\tools\Install-CodexOmniRouteDependencies.ps1
-```
-
-Запустить OmniRoute-окно:
+Начни с restore. Он только останавливает OmniRoute-managed helpers и не
+удаляет shared Codex home.
 
 ```powershell
-.\Start-Codex-OmniRoute.ps1
+.\Start-Codex-OmniRoute.ps1 -Restore
 ```
 
-Запустить только bridge без окна Codex:
+Частые проблемы:
 
-```powershell
-.\Start-Codex-OmniRoute.ps1 -NoCodex
-```
-
-Запустить официальный Codex без OmniRoute:
-
-```powershell
-.\Start-Codex-Official.ps1
-```
-
-Пересобрать `Setup.exe` из исходников:
-
-```powershell
-.\tools\Build-SetupExe.ps1
-```
-
-## Маршрутизация
-
-OmniRoute перехватывает только то, что должно идти через OmniRoute. Остальное
-остаётся на официальном backend Codex.
-
-| Запрос | Куда идёт |
+| Симптом | Что сделать |
 | --- | --- |
-| `/v1/responses` | OmniRoute bridge |
-| `/v1/chat/completions` | OmniRoute bridge |
-| `/v1/images/generations` | OmniRoute image lane |
-| `/v1/images/edits` | OmniRoute image lane |
-| `/v1/responses/compact` | Official Codex/OpenAI backend |
-| `/v1/audio/transcriptions`, `/transcribe` | Official Codex/OpenAI backend |
-| `/v1/models` | Shared `%USERPROFILE%\.codex\models_cache.json` |
+| Setup пишет, что official Codex missing | Установи OpenAI Codex из Microsoft Store, открой один раз, войди в аккаунт, затем снова запусти `Setup.exe`. |
+| Setup просит base URL или API key | Введи значения OmniRoute или заранее создай `omniroute-provider.json`. |
+| Один MCP показывает `auth_required` | MCP есть в shared config, но ему нужен свой token или OAuth grant. Настрой его в official Codex home. |
+| OmniRoute window открывается, но bridge hits не растут | Открой `http://127.0.0.1:20333/healthz`, проверь `main_reasoning_hits`, затем запусти verifier. |
+| Что-то выглядит stale | Запусти `.\Start-Codex-OmniRoute.ps1 -Restore`, затем снова `.\Setup.exe`. |
 
-Компактинг и диктовка остаются официальными. Основное reasoning и image lane
-идут через OmniRoute.
+<a id="under-the-hood"></a>
 
-## Tool search и apply patch
+<details>
+<summary><b>Под капотом: routes, native tools, images и architecture</b></summary>
 
-Codex-native tools должны продолжать работать в OmniRoute-окне.
+<br />
 
-Для `tool_search` bridge добавляет function shim `omniroute_tool_search`.
-Если upstream-модель вызывает этот shim, bridge переписывает ответ обратно в
-native `tool_search_call`, который выполняет Codex Desktop.
+## Карта маршрутов
 
-Для `apply_patch` bridge сохраняет native/freeform путь. Если upstream
-возвращает function-style patch call, bridge переписывает его обратно в
-Codex-native custom tool call. Локальный fallback также умеет применять
-маленькие патчи к временным файлам, включая пути с Unicode.
+Codex OmniRoute сохраняет native Codex behavior там, где это важно, и гонит
+через local bridge только OmniRoute lanes.
 
-## Изображения и ограничение 10MB
+<table>
+<tr>
+<td width="50%">
+<h3>Идёт через OmniRoute</h3>
+<ul>
+<li><code>/v1/responses</code></li>
+<li><code>/v1/chat/completions</code></li>
+<li><code>/v1/images/generations</code></li>
+<li><code>/v1/images/edits</code></li>
+</ul>
+</td>
+<td width="50%">
+<h3>Остаётся official</h3>
+<ul>
+<li><code>/v1/responses/compact</code></li>
+<li><code>/v1/audio/transcriptions</code></li>
+<li><code>/transcribe</code></li>
+<li>account, auth, sessions, connector state</li>
+</ul>
+</td>
+</tr>
+</table>
 
-Image lane настроен по SuperCodex-style схеме: изображения идут через
-OmniRoute, а compact и dictation остаются official.
+`/v1/models` отдаётся из общего `%USERPROFILE%\.codex\models_cache.json`.
 
-Если у image gateway отдельный ключ, укажи его при setup или через
-`omniroute-provider.json`:
+## Native tools без поломок
 
-```json
-{
-  "image_api_key": "YOUR_IMAGE_KEY",
-  "image_model": "chatgpt-web/gpt-5.3-instant"
-}
-```
+OmniRoute mode сохраняет Codex-native tools. Там, где upstream не понимает
+родной протокол Codex, bridge ставит адаптер.
 
-Некоторые OmniRoute-compatible upstreams отклоняют request body больше 10MB.
-Bridge держит свежие inline images в запросе, старые inline images складывает
-в локальный media cache и заменяет их текстовыми placeholders перед отправкой.
+| Tool path | Что происходит |
+| --- | --- |
+| `tool_search` | Bridge показывает upstream функцию `omniroute_tool_search` и переписывает результат обратно в native `tool_search_call` с client execution. |
+| `apply_patch` | Предпочитается native/freeform path. Function-style upstream calls переписываются обратно в Codex-native custom tool calls. |
+| MCP servers | Загружаются из настоящего общего `%USERPROFILE%\.codex\config.toml`. |
+| Plugins and connectors | Используют официальный shared home и cache. |
+
+## Изображения и проблема 10MB
+
+Image generation и edits могут идти через OmniRoute. Compact и dictation
+остаются official.
+
+Некоторые OmniRoute-compatible upstreams отклоняют body больше 10MB. Bridge
+оставляет свежие inline images в запросе, складывает старые inline images в
+bounded local media cache и заменяет пропущенные изображения text placeholders
+перед отправкой.
 
 Основные лимиты:
 
@@ -275,19 +292,44 @@ CODEX_OMNI_INLINE_IMAGE_HISTORY_BUDGET_BYTES=6291456
 CODEX_OMNI_MEDIA_CACHE_MAX_BYTES=536870912
 ```
 
-## Архитектура коротко
+<a id="architecture"></a>
 
-На Windows launcher использует duplicate-app gateway:
+## Архитектура
+
+Этот раздел нужен, если хочется понять механику. Для обычной установки
+достаточно `Setup.exe` и ярлыка **Codex OmniRoute**.
+
+```mermaid
+flowchart LR
+    Official["Official Codex app"]
+    Omni["Codex OmniRoute app"]
+    Home["Shared %USERPROFILE%/.codex"]
+    Wrapper["OmniRoute app-server wrapper"]
+    Bridge["Local OmniRoute bridge<br/>127.0.0.1:20333/v1"]
+    Route["OmniRoute upstream"]
+    OpenAI["Official Codex backend"]
+
+    Official --> Home
+    Omni --> Home
+    Omni --> Wrapper
+    Wrapper --> Bridge
+    Bridge --> Route
+    Bridge --> OpenAI
+
+    Route -. "main reasoning + image lane" .-> Bridge
+    OpenAI -. "compact + dictation" .-> Bridge
+```
+
+На Windows launcher:
 
 1. Копирует официальный Store app в
    `%LOCALAPPDATA%\CodexOmniRoute\WindowsApp`.
-2. Оставляет официальный `CODEX_HOME` равным `%USERPROFILE%\.codex`.
-3. Выносит только Electron UI state OmniRoute-окна в
+2. Оставляет active `CODEX_HOME` равным `%USERPROFILE%\.codex`.
+3. Выносит только OmniRoute Electron UI state в
    `%LOCALAPPDATA%\CodexOmniRoute\ElectronUserData`.
-4. Сохраняет официальный CLI как `resources\codex-official.exe`.
-5. Заменяет только `resources\codex.exe` в duplicate app на wrapper.
-6. Wrapper запускает `codex-official.exe app-server` с process-level
-   `-c` overrides для OmniRoute.
+4. Сохраняет official CLI как `resources\codex-official.exe`.
+5. Подключает app-server wrapper только внутри OmniRoute-окна.
+6. Запускает `codex-official.exe app-server` с process-level `-c` overrides.
 
 Главные overrides:
 
@@ -304,12 +346,20 @@ CODEX_OMNI_MEDIA_CACHE_MAX_BYTES=536870912
 -c 'model_providers.omniroute.supports_websockets=false'
 ```
 
-Эти overrides живут только в процессе **Codex OmniRoute**. Они не становятся
-глобальной настройкой официального Codex.
+Эти overrides существуют только внутри процесса **Codex OmniRoute**. Они не
+становятся глобальными настройками official Codex.
 
-## Legacy заметка
+## Ручные команды
 
-Старые версии могли создавать `.codex-omniroute-home`. Новая архитектура не
-использует эту папку как активный `CODEX_HOME`, не копирует туда auth/history
-и не импортирует туда MCP config. Если такая папка осталась после старой
-версии, она считается legacy artifact.
+Это нужно для разработки и диагностики.
+
+```powershell
+.\tools\Install-CodexOmniRouteDependencies.ps1
+.\Start-Codex-OmniRoute.ps1
+.\Start-Codex-OmniRoute.ps1 -NoCodex
+.\Start-Codex-Official.ps1
+.\verify-codex-omniroute.ps1 -ProbeAllMcp
+.\tools\Build-SetupExe.ps1
+```
+
+</details>
