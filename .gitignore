@@ -1,8 +1,8 @@
 # Codex OmniRoute — never commit runtime/auth state
 
-# Variant-3 isolated CODEX_HOME (seeded by Start-Codex-OmniRoute.ps1 at
-# every launch; deleted by Start-Codex-OmniRoute.ps1 -Restore). Contains
-# a copy of the user's auth.json -- never commit.
+# Legacy isolated CODEX_HOME from pre-shared-home builds. It is no longer an
+# active runtime home, but may exist on upgraded machines and can contain
+# copied auth/session state -- never commit it.
 .codex-omniroute-home/
 .codex-omniroute-home-*/
 
@@ -49,6 +49,7 @@ Thumbs.db
 tools/__pycache__/
 *.pyc
 mock-transcribe-upstream.log
+.setup-bootstrapper-build/
 
 # OmniRoute MCP/skills catalog cache (last-known-good copy of the remote
 # catalog; refreshed by tools/omniroute-catalog.mjs on every launch when

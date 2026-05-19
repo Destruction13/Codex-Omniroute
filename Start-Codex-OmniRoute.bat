@@ -1,5 +1,5 @@
 @echo off
-REM Convenience launcher: official Codex binary + managed config block + OmniRoute bridge.
+REM Convenience launcher: shared-home Codex OmniRoute gateway.
 REM Prefers PowerShell 7+ (pwsh) when installed; falls back to built-in Windows PowerShell.
 pushd "%~dp0"
 where /q pwsh.exe

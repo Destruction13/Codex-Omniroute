@@ -2,18 +2,20 @@
 /*
  * Codex OmniRoute -- centralised MCP / skills catalog client.
  *
- * Loads a JSON catalog describing MCP servers and skills, with a strict
- * fallback chain so the fork keeps working out-of-the-box on every machine:
+ * Loads an opt-in JSON catalog describing MCP servers and skills, with a
+ * strict fallback chain for centrally managed or operator-provided tooling:
  *
  *   1. Remote URL (if --catalog-url is set, fetched with optional Bearer)
  *   2. Last-known-good cache file written from the previous successful fetch
- *   3. Bundled default-mcp-catalog.json shipped inside the repository
+ *   3. default-mcp-catalog.json (empty in the base package unless an operator
+ *      deliberately populates a local bundle)
  *
+ * This helper is legacy/opt-in under the shared-home gateway. It can still
+ * emit safe helper MCP/skill snippets for operators, but the launcher no
+ * longer imports the user's MCP/plugin config into an isolated profile.
  * For each loaded MCP entry the helper emits a [mcp_servers.<name>] TOML
  * block to --toml-out. For each loaded skill entry it writes the skill
- * markdown to <isolated-home>/skills/<name>/SKILL.md. The launcher then
- * picks up the TOML via the existing Get-ImportableConfigBlocks pipeline,
- * so no duplicate parser logic lives in PowerShell.
+ * markdown to <codex-home>/skills/<name>/SKILL.md.
  *
  * A status JSON is emitted on stdout for the launcher to log:
  *
@@ -76,6 +78,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -86,7 +89,7 @@ const opts = {
   cachePath: "",
   bundlePath: "",
   tomlOut: "",
-  isolatedHome: "",
+  codexHome: "",
   timeoutMs: DEFAULT_TIMEOUT_MS,
   disabled: false,
 };
@@ -98,12 +101,13 @@ for (let i = 0; i < argv.length; i += 1) {
   else if (a === "--cache") opts.cachePath = argv[++i] || "";
   else if (a === "--bundle") opts.bundlePath = argv[++i] || "";
   else if (a === "--toml-out") opts.tomlOut = argv[++i] || "";
-  else if (a === "--isolated-home") opts.isolatedHome = argv[++i] || "";
+  else if (a === "--codex-home") opts.codexHome = argv[++i] || "";
+  else if (a === "--isolated-home") opts.codexHome = argv[++i] || "";
   else if (a === "--timeout-ms") opts.timeoutMs = parseInt(argv[++i], 10) || DEFAULT_TIMEOUT_MS;
   else if (a === "--disabled") opts.disabled = true;
   else if (a === "-h" || a === "--help") {
     process.stdout.write(
-      "Usage: omniroute-catalog.mjs --toml-out <path> --isolated-home <path>\n" +
+      "Usage: omniroute-catalog.mjs --toml-out <path> --codex-home <path>\n" +
       "                             [--catalog-url <url>] [--api-key <key>]\n" +
       "                             [--cache <path>] [--bundle <path>]\n" +
       "                             [--timeout-ms N] [--disabled]\n",
@@ -113,9 +117,20 @@ for (let i = 0; i < argv.length; i += 1) {
 }
 
 if (!opts.tomlOut) bail("--toml-out is required");
-if (!opts.isolatedHome) bail("--isolated-home is required");
+if (!opts.codexHome) bail("--codex-home is required");
 
 const warnings = [];
+const scriptRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+const builtinEnv = {
+  OMNIROUTE_NODE: process.execPath,
+  OMNIROUTE_NPX: process.platform === "win32"
+    ? path.join(path.dirname(process.execPath), "npx.cmd")
+    : "npx",
+  OMNIROUTE_SCRIPT_ROOT: scriptRoot,
+  OMNIROUTE_CODEX_HOME: opts.codexHome ? path.resolve(opts.codexHome) : "",
+  OMNIROUTE_ISOLATED_HOME: opts.codexHome ? path.resolve(opts.codexHome) : "",
+};
 
 function warn(message) {
   warnings.push(String(message));
@@ -141,7 +156,7 @@ function expandEnvString(value) {
   // literal text after :- when the variable is unset/empty without emitting a
   // warning, so non-secret defaults (e.g. localhost ports) stay in the JSON.
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
-    const raw = process.env[name];
+    const raw = process.env[name] ?? builtinEnv[name];
     if (raw === undefined || raw === null || raw === "") {
       if (fallback !== undefined) return fallback;
       warn(`env var \${${name}} is not set; expanding to empty string`);
@@ -190,11 +205,12 @@ function tomlInlineTable(obj) {
   return `{ ${parts.join(", ")} }`;
 }
 
-// Optional Codex-recognised scalars on an mcp_servers.<name> block that the
+// Optional Codex-recognised keys on an mcp_servers.<name> block that the
 // helper just passes through verbatim when present in the catalog entry. Keep
-// this list narrow so unknown keys do not silently leak into config.toml.
+// these lists narrow so unknown keys do not silently leak into config.toml.
 const OPTIONAL_NUMBER_KEYS = ["startup_timeout_sec", "tool_timeout_sec"];
-const OPTIONAL_BOOL_KEYS   = ["enabled"];
+const OPTIONAL_BOOL_KEYS   = ["enabled", "required"];
+const OPTIONAL_STRING_ARRAY_KEYS = ["enabled_tools", "disabled_tools"];
 
 function appendOptionalScalars(lines, server) {
   for (const key of OPTIONAL_NUMBER_KEYS) {
@@ -209,6 +225,24 @@ function appendOptionalScalars(lines, server) {
   for (const key of OPTIONAL_BOOL_KEYS) {
     if (server[key] === undefined || server[key] === null) continue;
     lines.push(`${key} = ${server[key] ? "true" : "false"}`);
+  }
+}
+
+function appendOptionalStringArrays(lines, server) {
+  for (const key of OPTIONAL_STRING_ARRAY_KEYS) {
+    if (server[key] === undefined || server[key] === null) continue;
+    if (!Array.isArray(server[key])) {
+      warn(`server "${server.name}" has non-array ${key}=${preview(server[key])}; skipped key`);
+      continue;
+    }
+    const values = server[key]
+      .map((value) => String(value || "").trim())
+      .filter(Boolean);
+    if (values.length === 0) {
+      warn(`server "${server.name}" has empty ${key}; skipped key`);
+      continue;
+    }
+    lines.push(`${key} = ${tomlArray(values)}`);
   }
 }
 
@@ -251,6 +285,7 @@ function emitMcpBlock(server) {
       lines.push(`env = ${tomlInlineTable(env)}`);
     }
     appendOptionalScalars(lines, server);
+    appendOptionalStringArrays(lines, server);
   } else if (transport === "http" || transport === "streamable_http" || transport === "sse") {
     if (!server.url) {
       warn(`http server "${name}" missing url; skipped`);
@@ -263,6 +298,7 @@ function emitMcpBlock(server) {
       lines.push(`http_headers = ${tomlInlineTable(headers)}`);
     }
     appendOptionalScalars(lines, server);
+    appendOptionalStringArrays(lines, server);
   } else {
     warn(`server "${name}" has unknown transport "${transport}"; skipped`);
     return null;
@@ -398,7 +434,7 @@ async function writeSkills(skills, baseUrl) {
   const written = [];
   if (!skills || skills.length === 0) return written;
 
-  const skillsRoot = path.join(opts.isolatedHome, "skills");
+  const skillsRoot = path.join(opts.codexHome, "skills");
   await fs.mkdir(skillsRoot, { recursive: true });
 
   for (const skill of skills) {

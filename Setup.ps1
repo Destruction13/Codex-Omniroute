@@ -1,66 +1,43 @@
 <#
 .SYNOPSIS
-    Interactive first-time setup for Codex OmniRoute.
+    One-click setup for the Codex OmniRoute shared-home gateway.
 
 .DESCRIPTION
-    Walks a non-technical user through the entire install in one go:
+    This setup is intentionally boring for the user:
 
-      1. Verifies prerequisites:
-           - Microsoft Store Codex app (Get-AppxPackage OpenAI.Codex)
-           - Node.js >= 18.18 on PATH
-           - PowerShell 5.1+ (we are running in it)
-         For each missing prerequisite the wizard prints a direct download
-         link and stops — fixing it is up to the user, but the link is
-         right there.
+      1. Verifies that official Codex Desktop is installed.
+      2. Installs local launcher dependencies under
+         %LOCALAPPDATA%\CodexOmniRoute\deps when needed.
+      3. Writes omniroute-provider.json from prompts, parameters, or env vars.
+      4. Refreshes the duplicated Windows app and builds the embedded
+         app-server wrapper.
+      5. Creates desktop and Start Menu shortcuts.
+      6. Runs the shared-home verifier.
 
-      2. Asks for the OmniRoute base_url and API key (the only two
-         questions). The API key is read with -AsSecureString so it
-         does not echo to the terminal. Both values land in
-         `omniroute-provider.json`, which is gitignored.
-
-      3. Writes `omniroute-provider.json` with sane defaults
-         (model_prefix = "cx/", default_model = "gpt-5.4",
-         gpt55_pin.enabled = false). Advanced fields can still be
-         edited by hand if needed; the wizard never asks about them.
-
-      4. Runs `verify-codex-omniroute.ps1 -NoLiveMcpSession` so the user
-         gets a bridge-only PASS/FAIL summary before they ever launch
-         Codex. A verifier crash never breaks Setup -- the config has
-         already been written, and the user can always proceed to
-         Start-Codex-OmniRoute.bat.
-
-      5. Tells the user exactly which .bat to double-click next.
-
-    Re-running Setup.bat overwrites `omniroute-provider.json` so you
-    can always restart from scratch with fresh credentials. The file
-    is in `.gitignore` and is never committed.
-
-.PARAMETER NonInteractive
-    Skip prompts; only check prerequisites and rerun the verifier.
-
-.PARAMETER SkipVerify
-    Do not run verify-codex-omniroute.ps1 at the end. Useful when the user
-    knows their machine is already set up and just wants to refresh
-    omniroute-provider.json.
+    It does not write user-scope CODEX_HOME and does not create an isolated
+    Codex home.
 #>
 
 [CmdletBinding()]
 param(
     [switch]$NonInteractive,
-    [switch]$SkipVerify
+    [switch]$SkipVerify,
+    [switch]$SkipShortcuts,
+    [string]$ProviderBaseUrl = '',
+    [string]$ProviderApiKey = '',
+    [string]$ProviderImageApiKey = ''
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-
-# ----------------------------------------------------------------------------
-# Pretty printing
-# ----------------------------------------------------------------------------
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {}
 
 function Write-Banner {
     Write-Host ''
     Write-Host '================================================================' -ForegroundColor Cyan
-    Write-Host '  Codex OmniRoute - first-time setup' -ForegroundColor Cyan
+    Write-Host '  Codex OmniRoute Setup' -ForegroundColor Cyan
     Write-Host '================================================================' -ForegroundColor Cyan
     Write-Host ''
 }
@@ -72,10 +49,10 @@ function Write-Step {
     Write-Host ('-' * 64) -ForegroundColor DarkGray
 }
 
-function Write-OK    { param([string]$Msg) Write-Host "  OK   $Msg" -ForegroundColor Green }
-function Write-Warn  { param([string]$Msg) Write-Host "  WARN $Msg" -ForegroundColor Yellow }
-function Write-Bad   { param([string]$Msg) Write-Host "  FAIL $Msg" -ForegroundColor Red }
-function Write-Hint  { param([string]$Msg) Write-Host "       $Msg" -ForegroundColor Gray }
+function Write-OK { param([string]$Message) Write-Host "  OK   $Message" -ForegroundColor Green }
+function Write-Warn { param([string]$Message) Write-Host "  WARN $Message" -ForegroundColor Yellow }
+function Write-Fail { param([string]$Message) Write-Host "  FAIL $Message" -ForegroundColor Red }
+function Write-Hint { param([string]$Message) Write-Host "       $Message" -ForegroundColor Gray }
 
 function Pause-IfInteractive {
     if (-not $NonInteractive) {
@@ -84,258 +61,303 @@ function Pause-IfInteractive {
     }
 }
 
-# ----------------------------------------------------------------------------
-# Prerequisite checks
-# ----------------------------------------------------------------------------
+function Get-RepoRoot {
+    if ($PSScriptRoot) { return [System.IO.Path]::GetFullPath($PSScriptRoot) }
+    return [System.IO.Path]::GetFullPath((Get-Location).Path)
+}
 
-function Test-Codex {
+function Convert-WindowsArgument {
+    param([AllowEmptyString()][string]$Value)
+    if ($null -eq $Value) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
+}
+
+function Join-WindowsArguments {
+    param([string[]]$Arguments)
+    return (($Arguments | ForEach-Object { Convert-WindowsArgument $_ }) -join ' ')
+}
+
+function Get-PowerShellHost {
+    $cmd = Get-Command pwsh.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    $cmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    $candidate = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    throw 'PowerShell was not found.'
+}
+
+function Invoke-PowerShellScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [string[]]$Arguments = @(),
+        [switch]$AllowFailure
+    )
+
+    $psExe = Get-PowerShellHost
+    $argList = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $Arguments
+    $proc = Start-Process -FilePath $psExe -ArgumentList (Join-WindowsArguments -Arguments $argList) -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -ne 0 -and -not $AllowFailure) {
+        throw "$ScriptPath exited with code $($proc.ExitCode)."
+    }
+    return $proc.ExitCode
+}
+
+function Assert-Workspace {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $required = @(
+        'codex-openai-omniroute-bridge.mjs',
+        'Start-Codex-OmniRoute.ps1',
+        'Start-Codex-Official.ps1',
+        'verify-codex-omniroute.ps1',
+        'tools\Install-CodexOmniRouteDependencies.ps1',
+        'tools\codex-appserver-wrapper.cs',
+        'bridge-modules\tool-adapters.mjs',
+        'bridge-modules\media-cache.mjs',
+        'omniroute-provider.example.json'
+    )
+    foreach ($rel in $required) {
+        $path = Join-Path $Root $rel
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "Missing required setup file: $path"
+        }
+    }
+    Write-OK "Project files are present in $Root"
+}
+
+function Assert-OfficialCodexInstalled {
     $pkg = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue
-    if ($pkg) {
-        Write-OK "Microsoft Store Codex installed (package $($pkg.PackageFullName))"
-        return $true
+    if (-not $pkg) {
+        Write-Fail 'Official Codex Desktop is not installed.'
+        Write-Hint 'Install official OpenAI Codex from Microsoft Store, sign in once, then run Setup.exe again.'
+        throw 'Official Codex Desktop is required.'
     }
-    Write-Bad "Microsoft Store Codex app is NOT installed."
-    Write-Hint "Open Microsoft Store and search for 'OpenAI Codex', or visit:"
-    Write-Hint "  https://apps.microsoft.com/search?query=openai+codex"
-    Write-Hint "After installing, sign in once and open the app, then re-run this Setup."
-    return $false
+    if ($pkg -is [array]) { $pkg = $pkg[0] }
+    Write-OK "Official Codex package found: $($pkg.PackageFullName)"
+    return $pkg
 }
 
-function Test-Node {
-    $cmd = Get-Command node -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        Write-Bad "Node.js is NOT installed (or not on PATH)."
-        Write-Hint "Download the LTS installer from https://nodejs.org/ and install it."
-        Write-Hint "After installing, close this window and re-run Setup.bat."
-        return $false
-    }
-    $ver = ''
-    try { $ver = (& node --version 2>$null).Trim() } catch {}
-    if ($ver -match '^v(\d+)\.(\d+)') {
-        $major = [int]$Matches[1]
-        $minor = [int]$Matches[2]
-        if ($major -gt 18 -or ($major -eq 18 -and $minor -ge 18)) {
-            Write-OK "Node.js $ver detected (>= 18.18 required)"
-            return $true
-        }
-        Write-Bad "Node.js $ver is too old; the bridge needs >= 18.18."
-        Write-Hint "Download the latest LTS from https://nodejs.org/ and re-run Setup.bat."
-        return $false
-    }
-    Write-Warn "Could not parse Node.js version output: '$ver'. Continuing optimistically."
-    return $true
-}
-
-function Test-Workspace {
-    # Confirm we're in the repo root: bridge script must be next to this Setup.ps1.
-    $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-    $bridge = Join-Path $root 'codex-openai-omniroute-bridge.mjs'
-    $launcher = Join-Path $root 'Start-Codex-OmniRoute.ps1'
-    $template = Join-Path $root 'omniroute-provider.example.json'
-    foreach ($f in @($bridge, $launcher, $template)) {
-        if (-not (Test-Path -LiteralPath $f)) {
-            Write-Bad "Missing $f"
-            Write-Hint "You must run Setup.bat from the repo root (where README.md sits)."
-            return $false
-        }
-    }
-    Write-OK "Repo files present (bridge, launcher, provider template)"
-    return $true
-}
-
-# ----------------------------------------------------------------------------
-# Provider JSON helpers
-# ----------------------------------------------------------------------------
-
-function Read-Required {
+function Read-RequiredValue {
     param(
         [string]$Prompt,
         [string]$Default = '',
         [string]$Example = ''
     )
+
     while ($true) {
         $hint = if ($Example) { " (example: $Example)" } else { '' }
         if ($Default) {
-            $line = Read-Host ("{0}{1} [Enter for default: {2}]" -f $Prompt, $hint, $Default)
-            if ([string]::IsNullOrWhiteSpace($line)) { return $Default }
-            return $line.Trim()
+            $value = Read-Host ("{0}{1} [Enter: {2}]" -f $Prompt, $hint, $Default)
+            if ([string]::IsNullOrWhiteSpace($value)) { return $Default }
+            return $value.Trim()
         }
-        $line = Read-Host ("{0}{1}" -f $Prompt, $hint)
-        if (-not [string]::IsNullOrWhiteSpace($line)) { return $line.Trim() }
-        Write-Warn 'This value is required. Try again.'
+        $value = Read-Host ("{0}{1}" -f $Prompt, $hint)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+        Write-Warn 'This value is required.'
     }
 }
 
-function Read-SecretRequired {
+function Read-SecretValue {
     param([string]$Prompt)
     while ($true) {
-        $sec = Read-Host -AsSecureString $Prompt
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+        $secure = Read-Host -AsSecureString $Prompt
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         try {
             $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         } finally {
             [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         }
         if (-not [string]::IsNullOrWhiteSpace($plain)) { return $plain.Trim() }
-        Write-Warn 'API key cannot be empty. Try again.'
+        Write-Warn 'This value is required.'
     }
-}
-
-function Read-YesNo {
-    param([string]$Prompt, [bool]$DefaultYes = $false)
-    $suffix = if ($DefaultYes) { '[Y/n]' } else { '[y/N]' }
-    $line = Read-Host ("{0} {1}" -f $Prompt, $suffix)
-    if ([string]::IsNullOrWhiteSpace($line)) { return $DefaultYes }
-    return ($line.Trim().ToLower() -in @('y', 'yes', 'д', 'да'))
 }
 
 function Save-ProviderJson {
     param(
-        [string]$Path,
-        [string]$BaseUrl,
-        [string]$ApiKey
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [Parameter(Mandatory = $true)][string]$ApiKey,
+        [string]$ImageApiKey = ''
     )
 
-    # Setup only asks for base_url and api_key. Every other field gets a
-    # sane default here. Power users who need to change model_prefix,
-    # model_aliases, default_model, or gpt55_pin can edit
-    # omniroute-provider.json by hand -- the wizard never asks about them.
-    $obj = [ordered]@{
-        '_comment'      = 'Generated by Setup.ps1. Edit by hand or rerun Setup.bat. NEVER commit this file. Advanced fields (model_prefix, model_aliases, default_model, gpt55_pin) use safe defaults -- change them only if you know you need to.'
-        'base_url'      = $BaseUrl
-        'api_key'       = $ApiKey
-        'model_prefix'  = 'cx/'
-        'default_model' = 'gpt-5.4'
+    $provider = [ordered]@{
+        '_comment' = 'Generated by Setup.exe / Setup.ps1. Never commit this file.'
+        'base_url' = $BaseUrl
+        'api_key' = $ApiKey
+        'default_model' = 'gpt-5.5'
+        'model_prefix' = 'cx/'
         'model_aliases' = [ordered]@{
             'gpt-5.5' = 'gpt-5.5-xhigh'
         }
-        'headers'       = @{ 'x-codex-omniroute-client' = 'codex-omniroute-bridge' }
-        'gpt55_pin'     = [ordered]@{
-            '_comment'      = 'Optional. Only used when OMNIROUTE_PIN_55=1 in env, OR enabled=true here.'
-            'enabled'       = $false
-            'connection_id' = ''
-            'aliases'       = @('gpt-5.5', 'gpt-5.5-thinking', 'gpt-5.5-mini')
+        'image_api_key' = $ImageApiKey
+        'image_model' = 'chatgpt-web/gpt-5.3-instant'
+        'headers' = @{
+            'x-codex-omniroute-client' = 'codex-omniroute-bridge'
         }
     }
-    $json = $obj | ConvertTo-Json -Depth 10
-    # UTF-8 without BOM (Codex's TOML/JSON loaders sometimes choke on BOMs).
+
+    $json = $provider | ConvertTo-Json -Depth 10
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $json, $utf8NoBom)
 }
 
-# ----------------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------------
+function Ensure-ProviderConfig {
+    param([Parameter(Mandatory = $true)][string]$Root)
 
+    $providerPath = Join-Path $Root 'omniroute-provider.json'
+    if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) { $ProviderBaseUrl = $env:CODEX_OMNI_OMNIROUTE_BASE_URL }
+    if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) { $ProviderApiKey = $env:CODEX_OMNI_OMNIROUTE_API_KEY }
+    if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) { $ProviderImageApiKey = $env:CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY }
+
+    if ($NonInteractive) {
+        if ((Test-Path -LiteralPath $providerPath) -and
+            [string]::IsNullOrWhiteSpace($ProviderBaseUrl) -and
+            [string]::IsNullOrWhiteSpace($ProviderApiKey)) {
+            Write-OK "Using existing provider config: $providerPath"
+            return $providerPath
+        }
+        if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl) -or [string]::IsNullOrWhiteSpace($ProviderApiKey)) {
+            throw 'NonInteractive setup requires existing omniroute-provider.json or CODEX_OMNI_OMNIROUTE_BASE_URL/CODEX_OMNI_OMNIROUTE_API_KEY.'
+        }
+    } else {
+        if (Test-Path -LiteralPath $providerPath) {
+            Write-Warn "Existing provider config will be overwritten: $providerPath"
+        }
+        if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) {
+            $ProviderBaseUrl = Read-RequiredValue -Prompt 'OmniRoute base URL' -Example 'https://your-omniroute.example/v1'
+        }
+        if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) {
+            $ProviderApiKey = Read-SecretValue -Prompt 'OmniRoute API key'
+        }
+        if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) {
+            $ProviderImageApiKey = Read-Host 'Optional image API key [Enter to reuse main key]'
+            if ($null -ne $ProviderImageApiKey) { $ProviderImageApiKey = $ProviderImageApiKey.Trim() }
+        }
+    }
+
+    Save-ProviderJson -Path $providerPath -BaseUrl $ProviderBaseUrl -ApiKey $ProviderApiKey -ImageApiKey $ProviderImageApiKey
+    Write-OK "Wrote provider config: $providerPath"
+    return $providerPath
+}
+
+function Install-Dependencies {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $setup = Join-Path $Root 'tools\Install-CodexOmniRouteDependencies.ps1'
+    $json = (& $setup -Quiet -AsJson | Out-String).Trim()
+    $deps = $json | ConvertFrom-Json -ErrorAction Stop
+    if (-not $deps.dotnet_sdk_available -or -not $deps.node_available) {
+        throw 'Dependency setup did not report Node.js and .NET SDK availability.'
+    }
+    Write-OK "Node.js ready ($($deps.node_source)): $($deps.node_exe)"
+    Write-OK ".NET SDK ready ($($deps.dotnet_source)): $($deps.dotnet_exe)"
+    return $deps
+}
+
+function Create-Shortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [string]$Arguments = '',
+        [string]$WorkingDirectory = '',
+        [string]$IconLocation = ''
+    )
+
+    $parent = Split-Path -Parent $Path
+    if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($Path)
+    $shortcut.TargetPath = $TargetPath
+    $shortcut.Arguments = $Arguments
+    if ($WorkingDirectory) { $shortcut.WorkingDirectory = $WorkingDirectory }
+    if ($IconLocation) { $shortcut.IconLocation = $IconLocation }
+    $shortcut.Save()
+}
+
+function Install-Shortcuts {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]$CodexPackage
+    )
+
+    $omniBat = Join-Path $Root 'Start-Codex-OmniRoute.bat'
+    $officialBat = Join-Path $Root 'Start-Codex-Official.bat'
+    $icon = Join-Path $CodexPackage.InstallLocation 'app\Codex.exe'
+    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
+    $programs = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
+    $folder = Join-Path $programs 'Codex OmniRoute'
+
+    Create-Shortcut -Path (Join-Path $desktop 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
+    Create-Shortcut -Path (Join-Path $desktop 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
+    Create-Shortcut -Path (Join-Path $folder 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
+    Create-Shortcut -Path (Join-Path $folder 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
+    Write-OK 'Desktop and Start Menu shortcuts created.'
+}
+
+function Prepare-Launcher {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $launcher = Join-Path $Root 'Start-Codex-OmniRoute.ps1'
+    [void](Invoke-PowerShellScript -ScriptPath $launcher -Arguments @('-Restore') -AllowFailure)
+    [void](Invoke-PowerShellScript -ScriptPath $launcher -Arguments @('-PrepareOnly'))
+    Write-OK 'Duplicated Codex OmniRoute app and app-server wrapper prepared.'
+}
+
+function Run-Verifier {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    $verifier = Join-Path $Root 'verify-codex-omniroute.ps1'
+    [void](Invoke-PowerShellScript -ScriptPath $verifier)
+    Write-OK 'Verifier completed successfully.'
+}
+
+$root = Get-RepoRoot
 Write-Banner
 
-Write-Step 1 'Checking prerequisites'
-$prereq = $true
-if (-not (Test-Workspace)) { $prereq = $false }
-if (-not (Test-Codex))     { $prereq = $false }
-if (-not (Test-Node))      { $prereq = $false }
-if (-not $prereq) {
-    Write-Host ''
-    Write-Bad 'Fix the missing prerequisites above and re-run Setup.bat.'
-    Pause-IfInteractive
-    exit 2
-}
+try {
+    Write-Step 1 'Checking project and official Codex'
+    Assert-Workspace -Root $root
+    $codexPackage = Assert-OfficialCodexInstalled
 
-$repoRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-$providerPath = Join-Path $repoRoot 'omniroute-provider.json'
-$templatePath = Join-Path $repoRoot 'omniroute-provider.example.json'
+    Write-Step 2 'Installing local dependencies'
+    [void](Install-Dependencies -Root $root)
 
-if ($NonInteractive) {
-    Write-Step 2 'Skipping interactive provider config (NonInteractive mode)'
-    if (-not (Test-Path -LiteralPath $providerPath)) {
-        Write-Bad 'omniroute-provider.json does not exist and NonInteractive was set.'
-        Write-Hint 'Re-run Setup.bat without flags to create it interactively.'
-        Pause-IfInteractive
-        exit 2
-    }
-    Write-OK "Using existing $providerPath"
-} else {
-    Write-Step 2 'OmniRoute provider configuration'
+    Write-Step 3 'Configuring OmniRoute provider'
+    [void](Ensure-ProviderConfig -Root $root)
 
-    if (Test-Path -LiteralPath $providerPath) {
-        Write-Warn "omniroute-provider.json already exists at $providerPath"
-        Write-Hint 'It will be overwritten with the values you enter below.'
-    }
+    Write-Step 4 'Preparing Windows app gateway'
+    Prepare-Launcher -Root $root
 
-    Write-Host ''
-    Write-Host '  You need an OmniRoute base_url and API key from the repo maintainer.' -ForegroundColor White
-    Write-Host '  See README.md, section "Where to get OmniRoute access", for the contact.' -ForegroundColor White
-    Write-Host ''
-
-    $baseUrl = Read-Required -Prompt 'OmniRoute base_url' -Example 'http://127.0.0.1:20128/v1'
-    $apiKey  = Read-SecretRequired -Prompt 'OmniRoute API key (input hidden)'
-
-    Save-ProviderJson -Path $providerPath -BaseUrl $baseUrl -ApiKey $apiKey
-
-    Write-OK "Wrote $providerPath"
-    Write-Hint 'This file is gitignored. Do not commit it.'
-    Write-Hint 'Advanced fields (model_prefix, default_model, gpt55_pin) use safe defaults.'
-    Write-Hint 'Edit omniroute-provider.json by hand only if you actually need to change them.'
-}
-
-if ($SkipVerify) {
-    Write-Step 3 'Skipping verifier (-SkipVerify)'
-} else {
-    Write-Step 3 'Running verifier (bridge-only smoke; no Codex GUI)'
-
-    $verifier = Join-Path $repoRoot 'verify-codex-omniroute.ps1'
-    if (-not (Test-Path -LiteralPath $verifier)) {
-        Write-Warn "Missing $verifier -- skipping verifier."
-        Write-Hint 'Your omniroute-provider.json was still written. You can launch Codex.'
+    if (-not $SkipShortcuts) {
+        Write-Step 5 'Creating launch shortcuts'
+        Install-Shortcuts -Root $root -CodexPackage $codexPackage
     } else {
-        # Prefer pwsh, fall back to powershell.exe.
-        $psExe = $null
-        $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
-        if ($cmd) { $psExe = $cmd.Source }
-        if (-not $psExe) {
-            $cmd = Get-Command powershell -ErrorAction SilentlyContinue
-            if ($cmd) { $psExe = $cmd.Source }
-        }
-        if (-not $psExe) {
-            Write-Warn 'No PowerShell host found to run the verifier -- skipping.'
-        } else {
-            # The verifier MUST NOT break Setup. The provider config has
-            # already been written; the user must be able to proceed to
-            # Start-Codex-OmniRoute.bat regardless of what the verifier
-            # reports. We pre-seed $LASTEXITCODE so Set-StrictMode -Latest
-            # never trips on an uninitialized automatic variable, and we
-            # wrap the call in try/catch so a thrown error still leaves
-            # Setup in a clean exit-0 state.
-            $global:LASTEXITCODE = 0
-            $verifierExit = $null
-            try {
-                & $psExe -NoProfile -File $verifier -NoLiveMcpSession
-                $verifierExit = $LASTEXITCODE
-            } catch {
-                Write-Warn ("Verifier could not be launched: {0}" -f $_.Exception.Message)
-            }
-            if ($null -eq $verifierExit) {
-                Write-Warn 'Verifier did not return an exit code; skipping its result.'
-                Write-Hint 'Your omniroute-provider.json was still written. You can launch Codex.'
-            } elseif ($verifierExit -eq 0) {
-                Write-OK "Verifier passed (exit 0)."
-            } else {
-                Write-Warn "Verifier exited with code $verifierExit. Review the table above."
-                Write-Hint 'Many WARN rows are expected on a first run before Codex Desktop has been opened once.'
-                Write-Hint 'A FAIL on bridge-pid-managed / bridge-health means the bridge could not start.'
-                Write-Hint 'You can still proceed to Start-Codex-OmniRoute.bat and try launching.'
-            }
-        }
+        Write-Step 5 'Skipping shortcuts'
+        Write-Warn 'Shortcut creation skipped by flag.'
     }
+
+    if (-not $SkipVerify) {
+        Write-Step 6 'Running shared-home verifier'
+        Run-Verifier -Root $root
+    } else {
+        Write-Step 6 'Skipping verifier'
+        Write-Warn 'Verifier skipped by flag.'
+    }
+
+    Write-Step 7 'Ready'
+    Write-Host ''
+    Write-Host '  Launch Codex OmniRoute from the Desktop or Start Menu shortcut.' -ForegroundColor Green
+    Write-Host '  Official Codex remains available through the normal app and shortcut.' -ForegroundColor Green
+    Write-Host ''
+    Pause-IfInteractive
+    exit 0
+} catch {
+    Write-Host ''
+    Write-Fail $_.Exception.Message
+    Pause-IfInteractive
+    exit 1
 }
-
-Write-Step 4 'Done. Next steps:'
-Write-Host ''
-Write-Host '  Double-click  Start-Codex-OmniRoute.bat  to launch Codex with OmniRoute.' -ForegroundColor Green
-Write-Host '  Double-click  Start-Codex-Official.bat   for vanilla Codex (no rerouting).' -ForegroundColor Green
-Write-Host ''
-Write-Host '  Logs live at  bridge.log  in this folder.' -ForegroundColor Gray
-Write-Host ''
-
-Pause-IfInteractive
-exit 0

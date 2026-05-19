@@ -2,34 +2,15 @@
 /*
  * Codex OmniRoute — local OpenAI-compatible bridge.
  *
- * Narrow waist of the Variant-3 architecture. The official Microsoft Store
- * Codex app (launched via Start-Codex-OmniRoute.ps1) runs against an
- * isolated CODEX_HOME (".codex-omniroute-home" next to the launcher). The
- * launcher seeds that directory with:
- *   - auth.json         : the user's real OAuth tokens copied verbatim from
- *                         their normal ~/.codex/auth.json (Codex Desktop
- *                         stays logged in as the user; fast mode +
- *                         ChatGPT credits keep working).
- *   - models_cache.json : copied from real ~/.codex if present.
- *   - config.toml       : written fresh by the launcher, selects
- *                         model_provider = "omniroute_bridge" pointing
- *                         at this bridge:
+ * Shared-home gateway architecture. Official Codex and Codex OmniRoute both
+ * use the normal Codex home (%USERPROFILE%\.codex on Windows, ~/.codex on
+ * macOS). The launcher selects OmniRoute only for its own process by passing
+ * runtime -c overrides that point model calls at this local bridge.
  *
- *                           [model_providers.omniroute_bridge]
- *                           base_url = "http://127.0.0.1:<PORT>/v1"
- *                           wire_api = "responses"
- *                           requires_openai_auth = true
- *                           supports_websockets = false
- *
- * state_5.sqlite is deliberately absent in the isolated dir so Codex
- * Desktop starts with an empty thread store and reads model_provider
- * from the freshly-written config.toml on the first new thread.
- *
- * The bridge reads $CODEX_HOME/auth.json directly to recover the real
- * OAuth bearer for compact + dictation passthrough — no sentinel auth
- * scheme, no CODEX_OFFICIAL_AUTH_PATH redirection. Codex Desktop sends
- * the same real bearer on its requests, so the official-passthrough
- * path forwards it verbatim.
+ * The bridge reads $CODEX_HOME/auth.json directly to recover the official
+ * OAuth bearer for compact + dictation passthrough. Codex Desktop also sends
+ * the real bearer on its requests, so the official-passthrough path forwards
+ * it as-is.
  *
  * Behavior summary
  *   /healthz                       -> local status
@@ -39,7 +20,8 @@
  *   POST /v1/responses/compact     -> official upstream
  *   POST /v1/audio/transcriptions  -> official upstream
  *   POST /transcribe               -> official upstream /audio/transcriptions
- *   GET/POST /v1/images/generations-> official upstream (optional parity)
+ *   GET/POST /v1/images/generations-> OmniRoute image lane
+ *   GET/POST /v1/images/edits      -> OmniRoute image lane
  *   *                              -> official upstream proxy with auth fallback
  *
  * Hard rules
@@ -63,11 +45,14 @@ import os from "node:os";
 import process from "node:process";
 import { StringDecoder } from "node:string_decoder";
 
+import { createMediaCache } from "./bridge-modules/media-cache.mjs";
+import { createToolAdapters } from "./bridge-modules/tool-adapters.mjs";
+
 // ----------------------------------------------------------------------------
 // Configuration
 // ----------------------------------------------------------------------------
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0-shared-home";
 const STARTED_AT = Date.now();
 
 const HOST = process.env.CODEX_BRIDGE_HOST || "127.0.0.1";
@@ -77,22 +62,15 @@ const OFFICIAL_UPSTREAM = stripTrailingSlash(
   process.env.CODEX_OFFICIAL_UPSTREAM || "https://chatgpt.com/backend-api/codex",
 );
 
-// CODEX_HOME under Variant 3 is the isolated ".codex-omniroute-home"
-// directory next to the launcher. The launcher seeds it on every boot:
-// auth.json comes from the user's real ~/.codex/auth.json (so Codex
-// Desktop stays signed in), models_cache.json is copied if present, and
-// config.toml is regenerated with the managed OmniRoute provider plus
-// selected MCP/plugin/marketplace/project sections imported from the real
-// user config or overlay. The bridge reads auth.json from here for the
-// official-passthrough fallback, and models_cache.json for /v1/models. No
-// CODEX_OFFICIAL_AUTH_PATH redirection: Codex Desktop sends the real OAuth
-// bearer on its requests, so we forward it as-is.
+// CODEX_HOME is the normal official Codex home. OmniRoute mode is selected by
+// process-level launcher overrides, not by a separate profile.
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const CODEX_AUTH_PATH = path.join(CODEX_HOME, "auth.json");
 const CODEX_MODELS_PATH = path.join(CODEX_HOME, "models_cache.json");
-const CODEX_SEED_STAMP_PATH = path.join(CODEX_HOME, ".omniroute-seed.json");
 const CODEX_CONFIG_PATH = path.join(CODEX_HOME, "config.toml");
-const LAST_REASONING_DIAGNOSTIC_PATH = path.join(CODEX_HOME, ".omniroute-last-reasoning.json");
+const OMNIROUTE_DIAGNOSTIC_DIR =
+  process.env.CODEX_OMNI_DIAGNOSTIC_DIR || path.join(CODEX_HOME, "omniroute", "diagnostics");
+const LAST_REASONING_DIAGNOSTIC_PATH = path.join(OMNIROUTE_DIAGNOSTIC_DIR, "last-reasoning.json");
 
 const OMNIROUTE_BASE_URL_ENV = stripTrailingSlash(process.env.OMNIROUTE_BASE_URL || "");
 const OMNIROUTE_API_KEY_ENV = process.env.OMNIROUTE_API_KEY || "";
@@ -109,9 +87,68 @@ const OPENCODE_PROVIDER_NAMES = ["cloud_omni", "miracloud", "omniroute"];
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEX_BRIDGE_REQUEST_TIMEOUT_MS || "300000", 10);
 const LOG_LEVEL = (process.env.CODEX_BRIDGE_LOG_LEVEL || "info").toLowerCase();
+const OMNIROUTE_MAX_BODY_BYTES = parseInt(
+  process.env.CODEX_OMNI_OMNIROUTE_MAX_BODY_BYTES || String(10 * 1024 * 1024),
+  10,
+);
+const OMNIROUTE_BODY_HEADROOM_BYTES = parseInt(
+  process.env.CODEX_OMNI_OMNIROUTE_BODY_HEADROOM_BYTES || "65536",
+  10,
+);
+const OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES = Math.max(
+  1024,
+  OMNIROUTE_MAX_BODY_BYTES - Math.max(0, OMNIROUTE_BODY_HEADROOM_BYTES || 0),
+);
+const INLINE_IMAGE_HISTORY_BUDGET_BYTES = Math.max(
+  0,
+  parseInt(process.env.CODEX_OMNI_INLINE_IMAGE_HISTORY_BUDGET_BYTES || String(6 * 1024 * 1024), 10) ||
+    6 * 1024 * 1024,
+);
+const MEDIA_CACHE_DIR =
+  process.env.CODEX_OMNI_MEDIA_CACHE_DIR ||
+  path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "CodexOmniRoute", "media");
+const MEDIA_CACHE_MAX_BYTES = Math.max(
+  0,
+  parseInt(process.env.CODEX_OMNI_MEDIA_CACHE_MAX_BYTES || String(512 * 1024 * 1024), 10) ||
+    512 * 1024 * 1024,
+);
+const MEDIA_CACHE_MAX_AGE_MS = Math.max(
+  0,
+  parseInt(process.env.CODEX_OMNI_MEDIA_CACHE_MAX_AGE_MS || String(7 * 24 * 60 * 60 * 1000), 10) ||
+    7 * 24 * 60 * 60 * 1000,
+);
 
 const APPLY_PATCH_TOOL_NAME = "apply_patch";
 const APPLY_PATCH_ARGUMENT_KEYS = ["input", "patch", "content", "text", "body", "arguments"];
+const TOOL_SEARCH_SHIM_FUNCTION_NAME =
+  process.env.CODEX_OMNI_TOOL_SEARCH_SHIM_FUNCTION_NAME || "omniroute_tool_search";
+const ENABLE_TOOL_SEARCH_FUNCTION_SHIM = !/^(0|false|no)$/i.test(
+  process.env.CODEX_OMNI_ENABLE_TOOL_SEARCH_FUNCTION_SHIM || "1",
+);
+const ENABLE_TOOL_SEARCH_ALIAS_RERANK = !/^(0|false|no)$/i.test(
+  process.env.CODEX_OMNI_ENABLE_TOOL_SEARCH_ALIAS_RERANK || "1",
+);
+const ENABLE_APPLY_PATCH_FUNCTION_ADAPTER = !/^(0|false|no)$/i.test(
+  process.env.CODEX_OMNI_ENABLE_APPLY_PATCH_FUNCTION_ADAPTER || "1",
+);
+const TOOL_SEARCH_ALIASES_PATH =
+  process.env.CODEX_OMNI_TOOL_SEARCH_ALIASES ||
+  path.join(CODEX_HOME, "plugins", "cache", "omniroute-local", "omniroute-productivity", "0.1.2", "routing", "tool-search-aliases.json");
+const IMAGE_GENERATIONS_PATH = "/v1/images/generations";
+const IMAGE_EDITS_PATH = "/v1/images/edits";
+const DEFAULT_OMNIROUTE_IMAGE_MODEL =
+  process.env.CODEX_OMNI_OMNIROUTE_IMAGE_MODEL || "chatgpt-web/gpt-5.3-instant";
+const DEFAULT_OMNIROUTE_IMAGE_COMPAT_MODEL =
+  process.env.CODEX_OMNI_OMNIROUTE_IMAGE_COMPAT_MODEL || "cgpt-web/gpt-5.3-instant";
+const OPENAI_COMPAT_IMAGE_MODELS = new Set([
+  DEFAULT_OMNIROUTE_IMAGE_MODEL,
+  DEFAULT_OMNIROUTE_IMAGE_COMPAT_MODEL,
+  "gpt-5.3-instant",
+  "gpt-image-2",
+  "gpt-image-1.5",
+  "gpt-image-1",
+  "gpt-image-1-mini",
+]);
 
 // Header allowlist for inbound -> outbound forwarding.
 const HOP_BY_HOP = new Set([
@@ -242,12 +279,32 @@ async function resolveProvider() {
       model_aliases: parseModelAliases(fromJson.model_aliases),
       default_model: fromJson.default_model || "gpt-5.4",
       headers: fromJson.headers || {},
+      image_api_key: fromJson.image_api_key || fromJson.imageApiKey || "",
       gpt55_pin: fromJson.gpt55_pin || {
         enabled: OMNIROUTE_PIN_55,
         connection_id: OMNIROUTE_55_CONNECTION_ID,
         aliases: ["gpt-5.5", "gpt-5.5-thinking", "gpt-5.5-mini"],
       },
       source: PROVIDER_JSON_PATH,
+    };
+    return PROVIDER;
+  }
+  const superProvider = fromJson?.models?.providers?.omniroute;
+  if (superProvider?.baseUrl && (superProvider?.apiKey || OMNIROUTE_API_KEY_ENV)) {
+    PROVIDER = {
+      base_url: stripTrailingSlash(superProvider.baseUrl),
+      api_key: superProvider.apiKey || OMNIROUTE_API_KEY_ENV,
+      model_prefix: superProvider.model_prefix ?? OMNIROUTE_MODEL_PREFIX,
+      model_aliases: parseModelAliases(superProvider.model_aliases),
+      default_model: "gpt-5.5",
+      headers: fromJson.headers || {},
+      gpt55_pin: {
+        enabled: OMNIROUTE_PIN_55,
+        connection_id: OMNIROUTE_55_CONNECTION_ID,
+        aliases: ["gpt-5.5", "gpt-5.5-thinking", "gpt-5.5-mini"],
+      },
+      image_api_key: superProvider.imageApiKey || fromJson.image_api_key || "",
+      source: `${PROVIDER_JSON_PATH}#models.providers.omniroute`,
     };
     return PROVIDER;
   }
@@ -478,6 +535,41 @@ function normalizeModelForOmniRoute(model, provider) {
   return `${prefix}${stripped}`;
 }
 
+function requestedReasoningEffort(payload) {
+  const nested = typeof payload?.reasoning?.effort === "string" ? payload.reasoning.effort : "";
+  const direct = typeof payload?.reasoning_effort === "string" ? payload.reasoning_effort : "";
+  return (nested || direct).trim().toLowerCase();
+}
+
+function selectModelForOmniRoute(model, provider, payload) {
+  const normalized = normalizeModelForOmniRoute(model, provider);
+  const prefix = provider.model_prefix || "";
+  const effort = requestedReasoningEffort(payload);
+  const bare = typeof normalized === "string" && prefix && normalized.startsWith(prefix)
+    ? normalized.slice(prefix.length)
+    : normalized;
+
+  if (bare === "gpt-5.5") {
+    if (effort === "low") return `${prefix}gpt-5.5-low`;
+    if (effort === "medium") return `${prefix}gpt-5.5`;
+    if (effort === "high") return `${prefix}gpt-5.5-high`;
+    return `${prefix}gpt-5.5-xhigh`;
+  }
+
+  if (bare === "gpt-5.5-low" || bare === "gpt-5.5-high" || bare === "gpt-5.5-xhigh") {
+    return `${prefix}${bare}`;
+  }
+
+  return normalized;
+}
+
+function normalizeModelForOmniRouteImage(model) {
+  if (typeof model !== "string") return DEFAULT_OMNIROUTE_IMAGE_MODEL;
+  const trimmed = model.trim();
+  if (!trimmed || OPENAI_COMPAT_IMAGE_MODELS.has(trimmed)) return DEFAULT_OMNIROUTE_IMAGE_MODEL;
+  return trimmed;
+}
+
 function applyGpt55Pin(jsonBody, provider) {
   if (!provider.gpt55_pin || !provider.gpt55_pin.enabled) return jsonBody;
   const connId = provider.gpt55_pin.connection_id;
@@ -491,6 +583,246 @@ function applyGpt55Pin(jsonBody, provider) {
   return jsonBody;
 }
 
+function formatMegabytes(bytes) {
+  return `${(Math.max(0, bytes) / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function formatBytes(bytes) {
+  const normalized = Math.max(0, Number(bytes) || 0);
+  if (normalized >= 1024 * 1024) return `${(normalized / (1024 * 1024)).toFixed(2)} MB`;
+  if (normalized >= 1024) return `${(normalized / 1024).toFixed(2)} KB`;
+  return `${normalized} bytes`;
+}
+
+function isInlineDataImageUrl(value) {
+  return typeof value === "string" && /^data:image\//i.test(value);
+}
+
+function inlineImageMime(value) {
+  const match = /^data:([^;,]+)[;,]/i.exec(String(value || ""));
+  return match?.[1] || "image";
+}
+
+function inlineImagePlaceholder(url, mediaRef = null) {
+  const mime = mediaRef?.mime || inlineImageMime(url);
+  const bytes = mediaRef?.bytes || Buffer.byteLength(url, "utf8");
+  const refText = mediaRef?.uri ? `${mediaRef.uri}, ` : "";
+  const retention = mediaRef?.uri ? "cached locally with bounded TTL" : "retained in local Codex history";
+  return `[inline image omitted: ${refText}${mime}, ${formatMegabytes(bytes)}; ${retention}]`;
+}
+
+function replaceKnownImagePartWithPlaceholder(target, url, options = {}) {
+  const mediaRef = options.storeOmittedImages === false ? null : storeInlineImageInMediaCache(url, options.requestPath);
+  const placeholder = inlineImagePlaceholder(url, mediaRef);
+  if (target.type === "input_image") {
+    target.type = "input_text";
+    target.text = placeholder;
+    delete target.image_url;
+    delete target.detail;
+    return mediaRef;
+  }
+
+  if (target.type === "image_url") {
+    target.type = "text";
+    target.text = placeholder;
+    delete target.image_url;
+    delete target.detail;
+    return mediaRef;
+  }
+
+  target.image_url = placeholder;
+  return mediaRef;
+}
+
+function collectInlineImageRefs(value, refs = []) {
+  if (!value || typeof value !== "object") return refs;
+
+  if (Array.isArray(value)) {
+    for (const item of value) collectInlineImageRefs(item, refs);
+    return refs;
+  }
+
+  if ((value.type === "input_image" || value.type === "image_url") && isInlineDataImageUrl(value.image_url)) {
+    refs.push({ target: value, url: value.image_url, bytes: Buffer.byteLength(value.image_url, "utf8") });
+    return refs;
+  }
+
+  if (
+    value.type === "image_url" &&
+    value.image_url &&
+    typeof value.image_url === "object" &&
+    isInlineDataImageUrl(value.image_url.url)
+  ) {
+    refs.push({ target: value, url: value.image_url.url, bytes: Buffer.byteLength(value.image_url.url, "utf8") });
+    return refs;
+  }
+
+  for (const nested of Object.values(value)) collectInlineImageRefs(nested, refs);
+  return refs;
+}
+
+function sanitizeInlineImageHistory(payload, options = {}) {
+  const budgetBytes = Math.max(
+    0,
+    Number.isFinite(options.budgetBytes) ? options.budgetBytes : INLINE_IMAGE_HISTORY_BUDGET_BYTES,
+  );
+  const keepNewest = options.keepNewest !== false;
+  if ((budgetBytes <= 0 && keepNewest) || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return null;
+  }
+
+  const refs = collectInlineImageRefs(payload.input);
+  if (refs.length === 0) return null;
+
+  const totalInlineImageBytes = refs.reduce((sum, ref) => sum + ref.bytes, 0);
+  if (totalInlineImageBytes <= budgetBytes) {
+    return {
+      totalCount: refs.length,
+      omittedCount: 0,
+      keptCount: refs.length,
+      omittedBytes: 0,
+      keptBytes: totalInlineImageBytes,
+      totalInlineImageBytes,
+      budgetBytes,
+    };
+  }
+
+  let keptBytes = 0;
+  let keptCount = 0;
+  let omittedBytes = 0;
+  let omittedCount = 0;
+  let cachedCount = 0;
+  let cachedBytes = 0;
+
+  for (let index = refs.length - 1; index >= 0; index -= 1) {
+    const ref = refs[index];
+    const keep = (keepNewest && keptCount === 0) || keptBytes + ref.bytes <= budgetBytes;
+    if (keep) {
+      keptBytes += ref.bytes;
+      keptCount += 1;
+      continue;
+    }
+
+    const mediaRef = replaceKnownImagePartWithPlaceholder(ref.target, ref.url, options);
+    if (mediaRef) {
+      cachedCount += 1;
+      cachedBytes += mediaRef.bytes || 0;
+    }
+    omittedBytes += ref.bytes;
+    omittedCount += 1;
+  }
+
+  return {
+    totalCount: refs.length,
+    omittedCount,
+    keptCount,
+    omittedBytes,
+    keptBytes,
+    cachedCount,
+    cachedBytes,
+    totalInlineImageBytes,
+    budgetBytes,
+  };
+}
+
+function parseMultipartBoundary(contentType) {
+  const match = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(String(contentType || ""));
+  return (match?.[1] || match?.[2] || "").trim();
+}
+
+function splitMultipartBuffer(buffer, contentType) {
+  const boundary = parseMultipartBoundary(contentType);
+  if (!boundary) return null;
+  const raw = buffer.toString("latin1");
+  const delimiter = `--${boundary}`;
+  return { raw, delimiter, parts: raw.split(delimiter) };
+}
+
+function findMultipartFieldPartIndex(parts, fieldName) {
+  const marker = `name="${fieldName}"`;
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index].includes(marker)) return index;
+  }
+  return -1;
+}
+
+function extractMultipartFormFieldValue(buffer, contentType, fieldName) {
+  const split = splitMultipartBuffer(buffer, contentType);
+  if (!split) return null;
+  const index = findMultipartFieldPartIndex(split.parts, fieldName);
+  if (index < 0) return null;
+
+  const part = split.parts[index];
+  const bodyStart = part.indexOf("\r\n\r\n");
+  if (bodyStart < 0) return null;
+
+  const valueStart = bodyStart + 4;
+  const valueEnd = part.lastIndexOf("\r\n");
+  if (valueEnd < valueStart) return null;
+  return part.slice(valueStart, valueEnd);
+}
+
+function rewriteMultipartFormFieldValue(buffer, contentType, fieldName, nextValue) {
+  const split = splitMultipartBuffer(buffer, contentType);
+  if (!split) return null;
+  const index = findMultipartFieldPartIndex(split.parts, fieldName);
+  if (index < 0) return null;
+
+  const part = split.parts[index];
+  const bodyStart = part.indexOf("\r\n\r\n");
+  if (bodyStart < 0) return null;
+
+  const valueStart = bodyStart + 4;
+  const valueEnd = part.lastIndexOf("\r\n");
+  if (valueEnd < valueStart) return null;
+
+  split.parts[index] = `${part.slice(0, valueStart)}${nextValue}${part.slice(valueEnd)}`;
+  return Buffer.from(split.parts.join(split.delimiter), "latin1");
+}
+
+function appendMultipartFormFieldValue(buffer, contentType, fieldName, nextValue) {
+  const boundary = parseMultipartBoundary(contentType);
+  if (!boundary) return null;
+  const raw = buffer.toString("latin1");
+  const closingBoundary = `--${boundary}--`;
+  const closingIndex = raw.lastIndexOf(closingBoundary);
+  if (closingIndex < 0) return null;
+
+  const insertion = `--${boundary}\r\nContent-Disposition: form-data; name="${fieldName}"\r\n\r\n${nextValue}\r\n`;
+  return Buffer.from(`${raw.slice(0, closingIndex)}${insertion}${raw.slice(closingIndex)}`, "latin1");
+}
+
+function normalizeImageRequestBody(buffer, contentType, requestPath = IMAGE_GENERATIONS_PATH) {
+  if (!buffer || buffer.length === 0) return buffer;
+
+  const pathname = new URL(requestPath, "http://127.0.0.1").pathname;
+  const normalizedType = String(contentType || "").toLowerCase();
+
+  if (normalizedType.includes("application/json")) {
+    let payload;
+    try {
+      payload = JSON.parse(buffer.toString("utf8"));
+    } catch {
+      return buffer;
+    }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return buffer;
+    return Buffer.from(JSON.stringify({ ...payload, model: normalizeModelForOmniRouteImage(payload.model) }));
+  }
+
+  if (pathname === IMAGE_EDITS_PATH && normalizedType.includes("multipart/form-data")) {
+    const currentModel = extractMultipartFormFieldValue(buffer, contentType, "model");
+    const nextModel = normalizeModelForOmniRouteImage(currentModel);
+    return (
+      rewriteMultipartFormFieldValue(buffer, contentType, "model", nextModel) ||
+      appendMultipartFormFieldValue(buffer, contentType, "model", nextModel) ||
+      buffer
+    );
+  }
+
+  return buffer;
+}
+
 // ----------------------------------------------------------------------------
 // Codex native/freeform apply_patch <-> OmniRoute function adapter
 // ----------------------------------------------------------------------------
@@ -499,6 +831,7 @@ function createApplyPatchAdapterContext(suffix) {
   return {
     suffix,
     requestHadAdaptedApplyPatch: false,
+    requestHadToolSearchShim: false,
     adaptedApplyPatchToolCount: 0,
     originalApplyPatchTools: [],
     applyPatchFunctionCallItemIds: new Set(),
@@ -646,12 +979,61 @@ function normalizeMainRequestBody(buf, provider, applyPatchAdapterContext = null
     return buf;
   }
   if (parsed && typeof parsed === "object") {
-    if (parsed.model) parsed.model = normalizeModelForOmniRoute(parsed.model, provider);
+    if (parsed.model) parsed.model = selectModelForOmniRoute(parsed.model, provider, parsed);
     parsed.store = false;
     parsed = applyGpt55Pin(parsed, provider);
     parsed = rewriteApplyPatchToolsForOmniRoute(parsed, suffix, applyPatchAdapterContext);
+    if (toolAdapters.maybeInjectToolSearchFunctionShim(parsed, "omniroute")) {
+      if (applyPatchAdapterContext) applyPatchAdapterContext.requestHadToolSearchShim = true;
+      log("info", "tool_search function shim injected", { suffix, shim: TOOL_SEARCH_SHIM_FUNCTION_NAME });
+    }
+    const strippedToolSearchCount = toolAdapters.maybeStripNativeToolSearchTool(parsed, "omniroute");
+    if (strippedToolSearchCount > 0) {
+      log("info", "native tool_search stripped for OmniRoute upstream", {
+        suffix,
+        strippedToolSearchCount,
+        shim: TOOL_SEARCH_SHIM_FUNCTION_NAME,
+      });
+    }
+
+    const inlineImageStats = sanitizeInlineImageHistory(parsed, {
+      budgetBytes: INLINE_IMAGE_HISTORY_BUDGET_BYTES,
+      keepNewest: true,
+      requestPath: suffix || "/responses",
+    });
+    if (inlineImageStats?.omittedCount > 0) {
+      log("warn", "inline image history sanitized", {
+        suffix,
+        kept: inlineImageStats.keptCount,
+        omitted: inlineImageStats.omittedCount,
+        omittedBytes: inlineImageStats.omittedBytes,
+        cached: inlineImageStats.cachedCount || 0,
+      });
+    }
   }
-  return Buffer.from(JSON.stringify(parsed), "utf8");
+  let out = Buffer.from(JSON.stringify(parsed), "utf8");
+
+  if (out.length > OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES && parsed && typeof parsed === "object") {
+    const hardStats = sanitizeInlineImageHistory(parsed, {
+      budgetBytes: 0,
+      keepNewest: false,
+      requestPath: suffix || "/responses",
+    });
+    const compacted = Buffer.from(JSON.stringify(parsed), "utf8");
+    if (compacted.length < out.length) {
+      log("warn", "omniroute body hard-compacted for 10MB upstream limit", {
+        suffix,
+        originalBytes: out.length,
+        compactedBytes: compacted.length,
+        thresholdBytes: OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES,
+        maxBytes: OMNIROUTE_MAX_BODY_BYTES,
+        omittedImages: hardStats?.omittedCount || 0,
+      });
+      out = compacted;
+    }
+  }
+
+  return out;
 }
 
 // ----------------------------------------------------------------------------
@@ -691,6 +1073,7 @@ async function readConfiguredMcpServerNames() {
     const section = m[1].trim();
     if (!section.toLowerCase().startsWith("mcp_servers.")) continue;
     if (section.toLowerCase().endsWith(".env")) continue;
+    if (section.toLowerCase().endsWith(".http_headers")) continue;
     const name = stripTomlQuotes(section.slice("mcp_servers.".length));
     if (name) names.add(name);
   }
@@ -753,7 +1136,33 @@ function toolLooksLikeToolSearch(tool, summary) {
 function toolHasExplicitMcpAttachment(summary) {
   const type = normalizeToolSignal(summary?.type);
   if (type === "mcp" || type === "mcptool" || type === "mcpserver") return true;
+  if (extractMcpNamespaceServerSignal(summary)) return true;
   return Boolean(summary?.server_label || summary?.server_name);
+}
+
+const { maybeGcMediaCache, storeInlineImageInMediaCache } = createMediaCache({
+  mediaCacheDir: MEDIA_CACHE_DIR,
+  mediaCacheMaxBytes: MEDIA_CACHE_MAX_BYTES,
+  mediaCacheMaxAgeMs: MEDIA_CACHE_MAX_AGE_MS,
+  logBridge: (level, message, details = {}) => log(level, message, details),
+});
+
+const toolAdapters = createToolAdapters({
+  enableToolSearchFunctionShim: ENABLE_TOOL_SEARCH_FUNCTION_SHIM,
+  enableToolSearchAliasRerank: ENABLE_TOOL_SEARCH_ALIAS_RERANK,
+  enableApplyPatchFunctionAdapter: false,
+  toolSearchShimFunctionName: TOOL_SEARCH_SHIM_FUNCTION_NAME,
+  toolSearchAliasesPath: TOOL_SEARCH_ALIASES_PATH,
+  logBridge: (level, message, details = {}) => log(level, message, details),
+});
+
+function extractMcpNamespaceServerSignal(summary) {
+  for (const value of [summary?.name, summary?.namespace]) {
+    if (typeof value !== "string") continue;
+    const match = value.trim().match(/^mcp__(.+)__$/);
+    if (match?.[1]) return normalizeToolSignal(match[1]);
+  }
+  return "";
 }
 
 function explicitConfiguredMcpServerMatches(summary, serverSignals) {
@@ -761,6 +1170,10 @@ function explicitConfiguredMcpServerMatches(summary, serverSignals) {
   for (const value of [summary?.server_label, summary?.server_name]) {
     const signal = normalizeToolSignal(value);
     if (signal && serverSignals.has(signal)) matches.push(serverSignals.get(signal));
+  }
+  const namespaceSignal = extractMcpNamespaceServerSignal(summary);
+  if (namespaceSignal && serverSignals.has(namespaceSignal)) {
+    matches.push(serverSignals.get(namespaceSignal));
   }
   return matches;
 }
@@ -862,6 +1275,7 @@ async function summarizeReasoningRequestTools(bodyBuf, suffix, inboundHeaders = 
 
   LAST_REASONING_DIAGNOSTIC = diagnostic;
   try {
+    await fs.mkdir(path.dirname(LAST_REASONING_DIAGNOSTIC_PATH), { recursive: true });
     await fs.writeFile(
       LAST_REASONING_DIAGNOSTIC_PATH,
       JSON.stringify(diagnostic, null, 2),
@@ -896,8 +1310,7 @@ function buildForwardHeaders(inboundHeaders, mode, provider, officialAuth) {
     out["x-omniroute-client"] = out["x-omniroute-client"] || "codex-omniroute-bridge";
   } else if (mode === "official") {
     // Codex Desktop is sending its real OAuth bearer (loaded from the
-    // isolated $CODEX_HOME/auth.json, which the launcher seeded from
-    // the user's real ~/.codex/auth.json), so the simple thing is to
+    // shared $CODEX_HOME/auth.json), so the simple thing is to
     // pass it straight through to chatgpt.com. Only fall back to the
     // auth.json on disk if the inbound request didn't have one, e.g.
     // because something probed /transcribe directly without a bearer.
@@ -1211,6 +1624,29 @@ function transformApplyPatchResponseObject(value, ctx) {
   return out;
 }
 
+function transformToolAdapterResponseObject(value, requestMeta = {}) {
+  if (Array.isArray(value)) {
+    return value.map((entry) => transformToolAdapterResponseObject(entry, requestMeta));
+  }
+  if (!isRecord(value)) return value;
+
+  toolAdapters.normalizeResponseSsePayload(value, requestMeta);
+  toolAdapters.normalizeResponseItem(value, requestMeta);
+
+  for (const [key, nested] of Object.entries(value)) {
+    if (nested && typeof nested === "object") {
+      value[key] = transformToolAdapterResponseObject(nested, requestMeta);
+    }
+  }
+  return value;
+}
+
+function transformBridgeResponseObject(value, ctx) {
+  const requestMeta = { suffix: ctx?.suffix || null };
+  const afterApplyPatch = transformApplyPatchResponseObject(value, ctx);
+  return transformToolAdapterResponseObject(afterApplyPatch, requestMeta);
+}
+
 function isSseContentType(contentType) {
   return String(contentType || "").toLowerCase().includes("text/event-stream");
 }
@@ -1253,7 +1689,7 @@ function transformSseBlock(block, ctx) {
     return block + "\n\n";
   }
 
-  const transformed = transformApplyPatchResponseObject(parsed, ctx);
+  const transformed = transformBridgeResponseObject(parsed, ctx);
   const transformedEventName =
     isRecord(transformed) && typeof transformed.type === "string" ? transformed.type : eventName;
   const outLines = passthrough.filter((line) => line.length > 0 || passthrough.length === 1);
@@ -1303,9 +1739,13 @@ function pipeJsonWithApplyPatchTransform(upstreamRes, clientRes, ctx) {
       clientRes.end(body);
       return;
     }
-    const transformed = transformApplyPatchResponseObject(parsed, ctx);
+    const transformed = transformBridgeResponseObject(parsed, ctx);
     clientRes.end(Buffer.from(JSON.stringify(transformed), "utf8"));
   });
+}
+
+function shouldTransformBridgeResponse(ctx) {
+  return Boolean(ctx);
 }
 
 function forwardOutbound({
@@ -1333,7 +1773,7 @@ function forwardOutbound({
         if (HOP_BY_HOP.has(k.toLowerCase())) continue;
         if (v != null) clientRes.setHeader(k, v);
       }
-      if (shouldTransformApplyPatchResponse(responseAdapterContext)) {
+      if (shouldTransformBridgeResponse(responseAdapterContext)) {
         const contentType = upstreamRes.headers["content-type"];
         if (isSseContentType(contentType)) {
           pipeSseWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
@@ -1384,7 +1824,7 @@ function forwardOutbound({
 async function handleHealth(req, res) {
   const provider = await resolveProvider();
   const auth = await loadOfficialAuth();
-  const homeStatus = await inspectIsolatedCodexHome();
+  const homeStatus = await inspectSharedCodexHome();
   const lastReasoningRequest =
     LAST_REASONING_DIAGNOSTIC || (await tryReadJson(LAST_REASONING_DIAGNOSTIC_PATH));
 
@@ -1411,25 +1851,28 @@ async function handleHealth(req, res) {
       },
       official_auth_path: CODEX_AUTH_PATH,
       official_auth_present: Boolean(extractOfficialBearer(auth)),
-      // Variant-3 diagnostics. The launcher seeds CODEX_HOME with a
-      // .omniroute-seed.json stamp listing every file it wrote. We
-      // compare that stamp against the current directory contents to
-      // tell whether Codex Desktop is actually using CODEX_HOME (it
-      // would create state_5.sqlite and rewrite auth.json over time).
-      // main_reasoning_hits counts requests rerouted to OmniRoute since
-      // boot; if it stays at 0 after the user sends a chat message,
-      // Desktop ignored CODEX_HOME and bypassed the bridge.
+      image_lane: {
+        route: "omniroute",
+        default_model: DEFAULT_OMNIROUTE_IMAGE_MODEL,
+        configured: Boolean(resolveImageApiKey(provider)),
+      },
+      body_budget: {
+        omniroute_max_body_bytes: OMNIROUTE_MAX_BODY_BYTES,
+        threshold_bytes: OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES,
+        inline_image_history_budget_bytes: INLINE_IMAGE_HISTORY_BUDGET_BYTES,
+        media_cache_dir: MEDIA_CACHE_DIR,
+        media_cache_max_bytes: MEDIA_CACHE_MAX_BYTES,
+      },
+      tool_adapters: {
+        tool_search_function_shim: ENABLE_TOOL_SEARCH_FUNCTION_SHIM,
+        tool_search_alias_rerank: ENABLE_TOOL_SEARCH_ALIAS_RERANK,
+        tool_search_shim_function_name: TOOL_SEARCH_SHIM_FUNCTION_NAME,
+        apply_patch_function_adapter: ENABLE_APPLY_PATCH_FUNCTION_ADAPTER,
+      },
       main_reasoning_hits: MAIN_REASONING_HITS,
       last_reasoning_request_path: LAST_REASONING_DIAGNOSTIC_PATH,
       last_reasoning_request: lastReasoningRequest,
-      desktop_codex_home_honored: homeStatus.honored,
-      isolated_home: {
-        seed_stamp_path: CODEX_SEED_STAMP_PATH,
-        seed_stamp_present: homeStatus.stampPresent,
-        new_files: homeStatus.newFiles,
-        modified_files: homeStatus.modifiedFiles,
-        state_sqlite_present: homeStatus.stateSqlitePresent,
-      },
+      shared_home: homeStatus,
       models_cache_present: await pathExists(CODEX_MODELS_PATH),
     }),
   );
@@ -1486,6 +1929,23 @@ async function handleOmniRoutePost(req, res, suffix) {
   }
   const applyPatchAdapterContext = createApplyPatchAdapterContext(suffix);
   const bodyBuf = normalizeMainRequestBody(raw, provider, applyPatchAdapterContext, suffix);
+  if (bodyBuf.length > OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES) {
+    log("error", "omniroute body rejected after 10MB compaction", {
+      suffix,
+      bodyBytes: bodyBuf.length,
+      thresholdBytes: OMNIROUTE_BODY_FALLBACK_THRESHOLD_BYTES,
+      maxBytes: OMNIROUTE_MAX_BODY_BYTES,
+    });
+    res.statusCode = 413;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        error: "omniroute_body_too_large",
+        detail: `Request body is ${formatBytes(bodyBuf.length)} after inline-image compaction; OmniRoute limit is ${formatBytes(OMNIROUTE_MAX_BODY_BYTES)}.`,
+      }),
+    );
+    return;
+  }
   let toolDiagnostic = null;
   try {
     toolDiagnostic = await summarizeReasoningRequestTools(bodyBuf, suffix, req.headers);
@@ -1534,6 +1994,70 @@ async function handleOmniRoutePost(req, res, suffix) {
     clientRes: res,
     isStreaming: true,
     responseAdapterContext: applyPatchAdapterContext,
+  });
+}
+
+function resolveImageApiKey(provider) {
+  return (
+    process.env.CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY ||
+    process.env.OMNIROUTE_IMAGE_API_KEY ||
+    provider?.image_api_key ||
+    provider?.api_key ||
+    ""
+  );
+}
+
+async function handleOmniRouteImage(req, res, suffix) {
+  const provider = await resolveProvider();
+  if (!provider) {
+    res.statusCode = 500;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "omniroute_not_configured" }));
+    return;
+  }
+
+  const imageApiKey = resolveImageApiKey(provider);
+  if (!imageApiKey) {
+    res.statusCode = 500;
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        error: "omniroute_image_not_configured",
+        detail: "Set CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY, OMNIROUTE_IMAGE_API_KEY, or provider api_key.",
+      }),
+    );
+    return;
+  }
+
+  let raw;
+  try {
+    raw = await readRequestBody(req);
+    raw = await decompressBody(raw, req.headers["content-encoding"]);
+    raw = maybeBase64DecodeBody(raw, req.headers);
+  } catch (err) {
+    log("warn", "failed to decode inbound image body for", suffix, err?.message);
+    res.statusCode = 400;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "bad_request_encoding", detail: err?.message }));
+    return;
+  }
+
+  const requestPath = `/v1${suffix}`;
+  const bodyBuf = normalizeImageRequestBody(raw, req.headers["content-type"], requestPath);
+  const target = new URL(provider.base_url + suffix);
+  const headers = buildForwardHeaders(req.headers, "omniroute", { ...provider, api_key: imageApiKey }, null);
+  if (bodyBuf && bodyBuf.length > 0) headers["content-length"] = String(bodyBuf.length);
+  delete headers["x-codex-base64"];
+  delete headers["x-codex-base64-multipart"];
+
+  log("info", "omniroute image ->", target.href, `bytes=${bodyBuf?.length || 0}`);
+  forwardOutbound({
+    target,
+    method: req.method,
+    headers,
+    bodyBuf,
+    clientRes: res,
+    isStreaming: false,
   });
 }
 
@@ -1618,12 +2142,18 @@ async function router(req, res) {
     return handleOfficialPassthrough(req, res, "/audio/transcriptions");
   }
 
-  // Image generation parity (optional).
+  // Image generation/editing -> OmniRoute image lane.
   if (
     (m === "POST" || m === "GET") &&
     (p === "/v1/images/generations" || p === "/images/generations")
   ) {
-    return handleOfficialPassthrough(req, res, "/images/generations");
+    return handleOmniRouteImage(req, res, "/images/generations");
+  }
+  if (
+    (m === "POST" || m === "GET") &&
+    (p === "/v1/images/edits" || p === "/images/edits")
+  ) {
+    return handleOmniRouteImage(req, res, "/images/edits");
   }
 
   // Catchall: forward to official upstream (preserves account/MCP/skills/plugins backend calls).
@@ -1657,41 +2187,16 @@ async function tryReadJson(p) {
   }
 }
 
-// Compare the current $CODEX_HOME directory against the .omniroute-seed.json
-// stamp the launcher wrote at boot. Returns:
-//   stampPresent          : did the launcher write a seed stamp at all?
-//   stateSqlitePresent    : does state_5.sqlite (or any sqlite sidecar) exist
-//                            in $CODEX_HOME now? Codex Desktop only creates it
-//                            when it boots against this CODEX_HOME.
-//   newFiles              : files in $CODEX_HOME that the launcher did NOT
-//                            write at seed time. Anything here means a
-//                            running Codex Desktop has touched the directory.
-//   modifiedFiles         : seeded files whose mtime or size has changed
-//                            since the stamp (e.g. Desktop refreshed
-//                            auth.json on a token rotation).
-//   honored               : convenience boolean. true iff Desktop has
-//                            measurably touched the isolated dir (state_5
-//                            present || any new/modified file). The operator
-//                            can poll /healthz once after sending a chat
-//                            message and use this to decide whether to fall
-//                            back to a different isolation strategy.
-// The function is best-effort: any I/O failure returns honored=false with
-// the stamp_present=false so the verifier surfaces it instead of crashing.
-async function inspectIsolatedCodexHome() {
+async function inspectSharedCodexHome() {
   const result = {
-    stampPresent: false,
+    path: CODEX_HOME,
+    active_runtime_home: true,
+    config_present: false,
+    auth_present: false,
+    models_cache_present: false,
+    sessions_present: false,
     stateSqlitePresent: false,
-    newFiles: [],
-    modifiedFiles: [],
-    honored: false,
   };
-  let stamp = null;
-  try {
-    stamp = await tryReadJson(CODEX_SEED_STAMP_PATH);
-  } catch {
-    stamp = null;
-  }
-  result.stampPresent = Boolean(stamp);
 
   let entries = [];
   try {
@@ -1700,46 +2205,17 @@ async function inspectIsolatedCodexHome() {
     return result;
   }
 
-  const stampedByName = new Map();
-  if (stamp && Array.isArray(stamp.files)) {
-    for (const f of stamp.files) {
-      if (f && typeof f.name === "string") stampedByName.set(f.name, f);
-    }
-  }
-
   for (const ent of entries) {
-    if (!ent.isFile()) continue;
     const name = ent.name;
-    // Skip the stamp itself.
-    if (name === ".omniroute-seed.json") continue;
-    // state_5.sqlite (and its WAL/journal/shm sidecars) is the single most
-    // load-bearing signal that Desktop is using this CODEX_HOME.
+    if (ent.isDirectory() && name === "sessions") result.sessions_present = true;
+    if (!ent.isFile()) continue;
+    if (name === "config.toml") result.config_present = true;
+    if (name === "auth.json") result.auth_present = true;
+    if (name === "models_cache.json") result.models_cache_present = true;
     if (/^state_\d+\.sqlite(?:-journal|-wal|-shm)?$/.test(name)) {
       result.stateSqlitePresent = true;
     }
-    let stat = null;
-    try {
-      stat = await fs.stat(path.join(CODEX_HOME, name));
-    } catch {
-      continue;
-    }
-    const stamped = stampedByName.get(name);
-    if (!stamped) {
-      result.newFiles.push(name);
-      continue;
-    }
-    const stampedSize = typeof stamped.size === "number" ? stamped.size : null;
-    const stampedMtime = stamped.mtime ? Date.parse(stamped.mtime) : NaN;
-    if (stampedSize !== null && stat.size !== stampedSize) {
-      result.modifiedFiles.push(name);
-    } else if (!Number.isNaN(stampedMtime) && Math.abs(stat.mtimeMs - stampedMtime) > 1000) {
-      // Allow ~1s drift to absorb filesystem rounding (FAT, network mounts).
-      result.modifiedFiles.push(name);
-    }
   }
-
-  result.honored =
-    result.stateSqlitePresent || result.newFiles.length > 0 || result.modifiedFiles.length > 0;
   return result;
 }
 
@@ -1778,6 +2254,7 @@ server.on("error", (err) => {
 
 server.listen(PORT, HOST, async () => {
   await resolveProvider().catch(() => null);
+  maybeGcMediaCache();
   log(
     "info",
     `bridge listening`,

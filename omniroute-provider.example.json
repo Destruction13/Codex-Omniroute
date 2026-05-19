@@ -3,7 +3,9 @@
   "base_url": "http://127.0.0.1:20128/v1",
   "api_key": "REDACTED_PUT_YOUR_OMNIROUTE_KEY_HERE",
   "model_prefix": "cx/",
-  "default_model": "gpt-5.4",
+  "default_model": "gpt-5.5",
+  "image_api_key": "",
+  "image_model": "chatgpt-web/gpt-5.3-instant",
   "model_aliases": {
     "gpt-5.5": "gpt-5.5-xhigh"
   },

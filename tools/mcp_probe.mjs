@@ -33,7 +33,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 
 const PROTOCOL_VERSION = "2024-11-05";
@@ -111,6 +111,14 @@ function parseConfig(text) {
     if (!raw) return null;
     const t = raw.trim();
     if (t.length < 2) return null;
+    if (t.length >= 6 && t.startsWith("'''") && t.endsWith("'''")) return t.slice(3, -3);
+    if (t.length >= 6 && t.startsWith('"""') && t.endsWith('"""')) {
+      try {
+        return JSON.parse(`"${t.slice(3, -3).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`);
+      } catch {
+        return t.slice(3, -3);
+      }
+    }
     if (t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1);
     if (!(t.startsWith('"') && t.endsWith('"'))) return null;
     try {
@@ -429,16 +437,34 @@ class StdioMcpClient {
   close() {
     this.rejectAll(new ProbeError("closed", "probe closed transport"));
     if (!this.child) return;
-    try { this.child.kill("SIGTERM"); } catch {}
-    const killTimer = setTimeout(() => {
-      try { this.child.kill("SIGKILL"); } catch {}
-    }, 250);
-    try { killTimer.unref(); } catch {}
+    killChildProcessTree(this.child);
   }
 
   assertClean() {
     if (this.dirtyError) throw this.dirtyError;
   }
+}
+
+function killChildProcessTree(child) {
+  const pid = child?.pid;
+  if (!pid) return;
+
+  if (process.platform === "win32") {
+    try {
+      spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+        timeout: 3000,
+      });
+      return;
+    } catch {}
+  }
+
+  try { child.kill("SIGTERM"); } catch {}
+  const killTimer = setTimeout(() => {
+    try { child.kill("SIGKILL"); } catch {}
+  }, 250);
+  try { killTimer.unref(); } catch {}
 }
 
 class HttpMcpClient {
@@ -499,8 +525,16 @@ class HttpMcpClient {
 
       const text = await res.text();
       if (!res.ok) {
+        const lowerText = text.toLowerCase();
+        const isAuthFailure = res.status === 401 || res.status === 403;
+        const authStatus = isAuthFailure && (
+          lowerText.includes("missing authorization") ||
+          lowerText.includes("invalid_token") ||
+          lowerText.includes("unauthorized") ||
+          lowerText.includes("forbidden")
+        );
         throw new ProbeError(
-          failureStatus,
+          authStatus ? "auth_required" : failureStatus,
           `HTTP ${res.status} from ${this.url}: ${preview(text)}`,
           { http_status: res.status, http_header_names: redactHeaderNames(this.headers) },
         );
@@ -774,7 +808,7 @@ function errorResult(name, transport, err) {
 
 function statusTag(status) {
   if (status === "tools_listed" || status === "callable") return "PASS";
-  if (status === "no_tools" || status === "skipped_disabled") return "WARN";
+  if (status === "no_tools" || status === "skipped_disabled" || status === "auth_required") return "WARN";
   return "FAIL";
 }
 

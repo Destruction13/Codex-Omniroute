@@ -3,17 +3,15 @@
     Clean baseline launcher for the official Microsoft Store Codex app.
 
 .DESCRIPTION
-    Launches the *unmodified* Microsoft Store Codex app with NO
-    OmniRoute environment overrides, NO bridge, and NO helper processes.
+    Launches the *unmodified* Microsoft Store Codex app with no OmniRoute
+    runtime overrides, no bridge, and no helper processes.
 
-    Under the Variant-3 architecture the OmniRoute launcher does not
-    write managed blocks or auth sentinels into the user's real ~/.codex.
-    All OmniRoute state lives in a side directory
-    (".codex-omniroute-home" next to the OmniRoute launcher), and normal
-    mode switches preserve that directory so OmniRoute history survives.
-    This launcher just stops OmniRoute helper processes, clears stale
-    CODEX_HOME and the temporary taskkill-shim PATH prefix, performs
-    legacy/repair cleanup if needed, and activates Codex.
+    Codex OmniRoute now uses the same shared Codex home as official Codex:
+    %USERPROFILE%\.codex. The OmniRoute contour is selected only by the
+    OmniRoute launcher's process-level -c overrides. This official launcher
+    stops the managed bridge, clears stale legacy CODEX_HOME/PATH values from
+    older isolated-home builds, performs legacy cleanup if needed, and
+    activates Codex normally.
 
     For users upgrading from earlier versions (PR #3 or PR #2) we DO
     still sweep up any legacy artifacts those launchers left in the
@@ -36,9 +34,8 @@
       Get-AppxPackage OpenAI.Codex; the AppUserModelID is not hardcoded.
     - Sets no OMNIROUTE_*, CODEX_BRIDGE_*, or
       CODEX_ELECTRON_USER_DATA_PATH values. The only user-environment
-      mutations it may perform are clearing a stale CODEX_HOME that
-      points at this repo's isolated OmniRoute home and clearing a stale
-      taskkill-shim PATH prefix from the same isolated home.
+      mutation it may perform is clearing stale values left by older
+      isolated-home OmniRoute builds.
     - Exits non-zero if the official package is not installed.
 #>
 
@@ -247,10 +244,10 @@ public static class CodexOfficialAppxActivator {
 # ----------------------------------------------------------------------------
 # Legacy PR-#2 / PR-#3 cleanup (managed block + sentinel auth.json)
 #
-# Variant 3 does NOT write either into the user's real ~/.codex, so this
-# cleanup is purely a one-shot reverse-of-old-architecture for users
-# upgrading from earlier repo versions. On a fresh install or after the
-# first run of the v3 launchers, the cleanup finds nothing and exits.
+# The shared-home launcher does NOT write either into the user's real ~/.codex,
+# so this cleanup is purely a one-shot reverse-of-old-architecture for users
+# upgrading from earlier repo versions. On a fresh install or after the first
+# cleanup pass, it finds nothing and exits.
 # ----------------------------------------------------------------------------
 
 $LegacyManagedBlockBegin       = '# >>> codex-omniroute-managed (auto-generated; do not edit by hand)'

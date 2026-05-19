@@ -2,6 +2,11 @@
 /*
  * Codex OmniRoute -- apply_patch.bat rewriter.
  *
+ * Legacy fallback for older Windows builds. The shared-home launcher no longer
+ * starts this watcher by default because it enables native
+ * features.apply_patch_freeform through process-level overrides. Keep this
+ * helper for machines where live testing proves the native path still fails.
+ *
  * Codex creates a per-session `apply_patch.bat` under
  *   $CODEX_HOME/tmp/arg0/codex-arg0.../apply_patch.bat
  * The default wrapper points at the Microsoft Store package resources under
