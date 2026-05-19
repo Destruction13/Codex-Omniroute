@@ -1,0 +1,3 @@
+The Build-SetupExe.ps1 script creates CodexOmniRoute.zip in this directory at
+build time, embeds it into Setup.exe, and the WPF installer extracts it onto
+the user's machine. The zip is gitignored — only this placeholder is tracked.

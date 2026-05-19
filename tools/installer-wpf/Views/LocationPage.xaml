@@ -1,0 +1,78 @@
+<views:PageBase
+    x:Class="OmniRouteInstaller.Views.LocationPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="clr-namespace:OmniRouteInstaller.Views"
+    Title="Install Location">
+
+    <Grid Margin="48,28,48,28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Куда установить" Style="{StaticResource TitleText}" />
+            <TextBlock Margin="0,12,0,0"
+                       Style="{StaticResource SubtitleText}"
+                       Text="Выбери папку для распаковки Codex OmniRoute. Это плоская копия репозитория с launcher-скриптами и bridge. Шаги установщика не пишут ничего в Program Files и не требуют прав администратора." />
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" VerticalAlignment="Center">
+            <Border Style="{StaticResource Card}" Padding="22">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LabelText}" Text="ПАПКА УСТАНОВКИ" />
+                    <Grid Margin="0,10,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="PathTextBox"
+                                 Grid.Column="0"
+                                 Style="{StaticResource InputText}" />
+                        <Button Grid.Column="1"
+                                Margin="10,0,0,0"
+                                Style="{StaticResource SecondaryButton}"
+                                Content="Выбрать..."
+                                Click="Browse_Click" />
+                    </Grid>
+                    <TextBlock Margin="0,8,0,0"
+                               Style="{StaticResource CaptionText}"
+                               Text="Рекомендуем стабильный путь вроде C:\Tools\Codex-Omniroute. Папка будет создана, если её нет." />
+
+                    <CheckBox x:Name="ShortcutCheck"
+                              Style="{StaticResource CheckBoxStyle}"
+                              Margin="0,22,0,0"
+                              Content="Создать ярлыки Codex OmniRoute и Codex Official на рабочем столе и в Start Menu"
+                              IsChecked="True" />
+                </StackPanel>
+            </Border>
+
+            <Border Style="{StaticResource Card}"
+                    Margin="0,14,0,0"
+                    Padding="22"
+                    Background="{StaticResource BgPanelMuted}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource LabelText}" Text="ОБЩИЙ ДОМ" />
+                    <TextBlock Margin="0,8,0,0" Style="{StaticResource BodyText}">
+                        <Run Text="Codex OmniRoute не клонирует профиль. Auth, история, MCP, плагины живут в одном " />
+                        <Run FontFamily="{StaticResource MonoFont}" Foreground="{StaticResource TextPrimary}" Text="%USERPROFILE%\.codex" />
+                        <Run Text=", который остаётся нетронутым." />
+                    </TextBlock>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Button HorizontalAlignment="Left"
+                    Style="{StaticResource SecondaryButton}"
+                    Content="← Назад"
+                    Click="Back_Click" />
+            <Button HorizontalAlignment="Right"
+                    Style="{StaticResource PrimaryButton}"
+                    Content="Продолжить →"
+                    Click="Continue_Click" />
+        </Grid>
+    </Grid>
+</views:PageBase>

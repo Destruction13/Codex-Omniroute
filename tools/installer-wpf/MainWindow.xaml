@@ -1,0 +1,104 @@
+<Window
+    x:Class="OmniRouteInstaller.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="Codex OmniRoute Installer"
+    Width="900"
+    Height="620"
+    MinWidth="900"
+    MinHeight="620"
+    WindowStartupLocation="CenterScreen"
+    WindowStyle="None"
+    AllowsTransparency="True"
+    Background="Transparent"
+    FontFamily="{StaticResource UiFont}"
+    Foreground="{StaticResource TextPrimary}">
+
+    <Border CornerRadius="16"
+            Background="{StaticResource BgDeep}"
+            BorderBrush="{StaticResource Border}"
+            BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect Color="Black" BlurRadius="40" ShadowDepth="0" Opacity="0.45" />
+        </Border.Effect>
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="44" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="56" />
+            </Grid.RowDefinitions>
+
+            <!-- Title bar -->
+            <Border Grid.Row="0"
+                    Background="Transparent"
+                    MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <Grid>
+                    <StackPanel Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                Margin="20,0,0,0">
+                        <Ellipse Width="10" Height="10" Fill="{StaticResource Accent}" />
+                        <TextBlock Text="Codex OmniRoute"
+                                   Margin="10,0,0,0"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Foreground="{StaticResource TextPrimary}"
+                                   VerticalAlignment="Center" />
+                        <TextBlock Text="Installer"
+                                   Margin="8,0,0,0"
+                                   FontSize="13"
+                                   Foreground="{StaticResource TextDim}"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Margin="0,0,12,0">
+                        <Button x:Name="MinimizeButton"
+                                Width="36" Height="28"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Foreground="{StaticResource TextMuted}"
+                                Content="—"
+                                FontSize="14"
+                                Cursor="Hand"
+                                Click="Minimize_Click" />
+                        <Button x:Name="CloseButton"
+                                Width="36" Height="28"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Foreground="{StaticResource TextMuted}"
+                                Content="✕"
+                                FontSize="13"
+                                Cursor="Hand"
+                                Click="Close_Click" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Page area -->
+            <Frame x:Name="PageFrame"
+                   Grid.Row="1"
+                   NavigationUIVisibility="Hidden"
+                   Background="Transparent"
+                   Margin="0" />
+
+            <!-- Footer / step dots -->
+            <Border Grid.Row="2" Background="{StaticResource BgDeep}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
+                <Grid Margin="24,0,24,0">
+                    <StackPanel x:Name="StepDots"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center"
+                                HorizontalAlignment="Left" />
+                    <TextBlock x:Name="StepLabel"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"
+                               Style="{StaticResource CaptionText}" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

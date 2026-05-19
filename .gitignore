@@ -51,6 +51,11 @@ tools/__pycache__/
 mock-transcribe-upstream.log
 .setup-bootstrapper-build/
 
+# WPF installer build artifacts
+tools/installer-wpf/bin/
+tools/installer-wpf/obj/
+tools/installer-wpf/Resources/CodexOmniRoute.zip
+
 # OmniRoute MCP/skills catalog cache (last-known-good copy of the remote
 # catalog; refreshed by tools/omniroute-catalog.mjs on every launch when
 # OMNIROUTE_CATALOG_URL is set). Never commit -- the in-repo bundle
