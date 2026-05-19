@@ -355,7 +355,7 @@ if (Test-Path -LiteralPath $dependencySetup) {
 $launcherOutput = @()
 $launcherExit = $null
 try {
-    $launcherOutput = & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort 2>&1
+    & $psHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort
     $launcherExit = $LASTEXITCODE
 } catch {
     $launcherOutput = @($_.Exception.Message)
@@ -365,7 +365,9 @@ try {
 if ($launcherExit -eq 0) {
     Add-Result 'omniroute-launcher-nocodex' 'PASS' 'launcher started bridge without GUI'
 } else {
-    Add-Result 'omniroute-launcher-nocodex' 'FAIL' (($launcherOutput | Out-String).Trim())
+    $detail = (($launcherOutput | Out-String).Trim())
+    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "launcher exited with code $launcherExit" }
+    Add-Result 'omniroute-launcher-nocodex' 'FAIL' $detail
 }
 
 $active = Get-BridgeHealth -PreferredPort $BridgePort

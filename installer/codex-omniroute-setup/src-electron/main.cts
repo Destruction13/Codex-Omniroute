@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   createInitialSnapshot,
   getDefaultInstallDir,
+  launchInstalledOmniRoute,
   parseHeadlessRequest,
   SetupRunner,
 } from "./setup-runner.cjs";
@@ -61,7 +62,7 @@ const createWindow = async (): Promise<void> => {
       height: 38,
     },
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -117,6 +118,13 @@ ipcMain.handle("setup:open-log", async () => {
   if (currentSnapshot.logPath) {
     await shell.openPath(currentSnapshot.logPath);
   }
+});
+
+ipcMain.handle("setup:launch-installed", async () => {
+  if (!currentSnapshot.repoRoot) {
+    throw new Error("Codex OmniRoute is not installed yet.");
+  }
+  await launchInstalledOmniRoute(currentSnapshot.repoRoot);
 });
 
 const runHeadless = async (request: InstallRequest): Promise<void> => {

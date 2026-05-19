@@ -466,7 +466,8 @@ function Start-DetachedProcessWithEnvironment {
         [Parameter(Mandatory = $true)][string]$WorkingDirectory,
         [hashtable]$Environment = @{},
         [Parameter(Mandatory = $true)][string]$StdoutPath,
-        [Parameter(Mandatory = $true)][string]$StderrPath
+        [Parameter(Mandatory = $true)][string]$StderrPath,
+        [switch]$Hidden
     )
 
     $previous = @{}
@@ -481,8 +482,10 @@ function Start-DetachedProcessWithEnvironment {
             ArgumentList = $Arguments
             WorkingDirectory = $WorkingDirectory
             PassThru = $true
+            RedirectStandardOutput = $StdoutPath
+            RedirectStandardError = $StderrPath
         }
-        if (Test-WindowsHost) {
+        if ($Hidden -and (Test-WindowsHost)) {
             $startParams['WindowStyle'] = [System.Diagnostics.ProcessWindowStyle]::Hidden
         }
         return Start-Process @startParams
@@ -603,6 +606,27 @@ function Publish-AppServerWrapper {
     }
 }
 
+function Get-FileSha256 {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $cmd = Get-Command Get-FileHash -ErrorAction SilentlyContinue
+    if ($cmd) {
+        return (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash
+    }
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 function Ensure-OmniRouteWindowsAppDuplicate {
     param(
         [Parameter(Mandatory = $true)][string]$SourceAppDir,
@@ -637,8 +661,8 @@ function Ensure-OmniRouteWindowsAppDuplicate {
     }
     $deps = Resolve-OmniRouteDependencies -ScriptRoot $ScriptRoot
 
-    $wrapperHash = (Get-FileHash -LiteralPath $wrapperSource -Algorithm SHA256).Hash
-    $setupHash = (Get-FileHash -LiteralPath $setupScript -Algorithm SHA256).Hash
+    $wrapperHash = Get-FileSha256 -LiteralPath $wrapperSource
+    $setupHash = Get-FileSha256 -LiteralPath $setupScript
     $expectedMarker = "$PackageFullName`n$wrapperHash`n$setupHash`ndotnet-publish"
     $currentMarker = if (Test-Path -LiteralPath $markerPath) {
         (Get-Content -LiteralPath $markerPath -Raw).Trim()
@@ -868,7 +892,8 @@ $bridgeProc = Start-DetachedProcessWithEnvironment `
     -WorkingDirectory $scriptRoot `
     -Environment $bridgeEnv `
     -StdoutPath $bridgeStdoutLog `
-    -StderrPath $bridgeStderrLog
+    -StderrPath $bridgeStderrLog `
+    -Hidden
 
 if (-not $bridgeProc) { throw "Failed to start bridge process." }
 Set-Content -LiteralPath $bridgePid -Value $bridgeProc.Id -Encoding ASCII

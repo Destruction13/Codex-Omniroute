@@ -8,6 +8,7 @@ import path from "node:path";
 
 import type {
   InstallRequest,
+  LaunchResult,
   PowerShellHost,
   ProcessResult,
   SetupEvent,
@@ -66,6 +67,48 @@ export function createInitialSnapshot(): SetupSnapshot {
 
 export function getDefaultInstallDir(): string {
   return path.join(os.homedir(), "CodexOmniRoute");
+}
+
+interface OmniRouteProcess {
+  processId: number;
+  executablePath: string;
+  commandLine: string;
+}
+
+interface BridgeHealthProbe {
+  port: number;
+  source: string;
+}
+
+export async function launchInstalledOmniRoute(repoRoot: string): Promise<LaunchResult> {
+  const resolvedRoot = path.resolve(repoRoot);
+  const script = path.join(resolvedRoot, "Start-Codex-OmniRoute.ps1");
+  const providerPath = path.join(resolvedRoot, "omniroute-provider.json");
+  if (!(await exists(script))) {
+    throw new Error(`Codex OmniRoute launcher was not found: ${script}`);
+  }
+  if (!(await exists(providerPath))) {
+    throw new Error(`OmniRoute provider config was not found: ${providerPath}`);
+  }
+
+  const powerShell = await findPowerShellHost();
+  await spawnDetached(
+    powerShell.exe,
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+    ],
+    resolvedRoot,
+  );
+
+  const result = await waitForLaunchedOmniRoute(resolvedRoot, providerPath, 60_000);
+  await focusOmniRouteWindow(result.processId).catch(() => undefined);
+  return result;
 }
 
 export function parseHeadlessRequest(argv: string[]): InstallRequest | null {
@@ -141,7 +184,7 @@ export class SetupRunner {
       await this.writeProviderConfig(repoRoot, normalized);
       await this.prepareGateway(powerShell, repoRoot, normalized.skipShortcuts === true);
       await this.runVerifier(powerShell, repoRoot);
-      await this.launch(powerShell, repoRoot, normalized.launchAfterInstall);
+      await this.launch(repoRoot, normalized.launchAfterInstall);
 
       this.snapshot.status = "success";
       this.publish();
@@ -182,40 +225,7 @@ export class SetupRunner {
 
   private async ensurePowerShell(): Promise<PowerShellHost> {
     return this.runStep("powershell", "Locating built-in Windows PowerShell", async () => {
-      const candidates = unique([
-        path.join(
-          process.env.SystemRoot ?? "C:\\Windows",
-          "System32",
-          "WindowsPowerShell",
-          "v1.0",
-          "powershell.exe",
-        ),
-        ...(await this.where("powershell.exe")),
-        ...(await this.where("pwsh.exe")),
-      ]);
-
-      for (const candidate of candidates) {
-        if (!(await exists(candidate))) {
-          continue;
-        }
-        const result = await runRaw(candidate, [
-          "-NoLogo",
-          "-NoProfile",
-          "-Command",
-          "$PSVersionTable.PSVersion.ToString()",
-        ]);
-        if (result.code === 0) {
-          const version = result.stdout.trim().split(/\r?\n/).at(-1) ?? "unknown";
-          return {
-            exe: candidate,
-            label: `PowerShell ${version}`,
-          };
-        }
-      }
-
-      throw new Error(
-        "PowerShell was not found. Windows PowerShell is a required OS component for Store/AppX repair and OmniRoute setup.",
-      );
+      return findPowerShellHost();
     });
   }
 
@@ -461,6 +471,21 @@ Repair-WinGetPackageManager
       const target = path.join(parent, "Codex-Omniroute");
       await fs.mkdir(parent, { recursive: true });
 
+      const sourceOverride = process.env.CODEX_OMNI_SETUP_SOURCE_DIR;
+      if (sourceOverride) {
+        const sourceRoot = path.resolve(sourceOverride);
+        if (!(await isRepoRoot(sourceRoot))) {
+          throw new Error(`CODEX_OMNI_SETUP_SOURCE_DIR is not a valid repo root: ${sourceRoot}`);
+        }
+        if (!isSafeGeneratedTarget(parent, target)) {
+          throw new Error(`Refusing to write outside selected install directory: ${target}`);
+        }
+        await this.appendLog("source", `Copying source tree from ${sourceRoot}`);
+        await fs.rm(target, { recursive: true, force: true });
+        await copySourceTree(sourceRoot, target);
+        return target;
+      }
+
       if (await isRepoRoot(target)) {
         const git = await this.firstWhere("git.exe");
         if (git && (await exists(path.join(target, ".git")))) {
@@ -487,21 +512,6 @@ Repair-WinGetPackageManager
         throw new Error(
           `Install target already exists but is not a Codex OmniRoute repository: ${target}`,
         );
-      }
-
-      const sourceOverride = process.env.CODEX_OMNI_SETUP_SOURCE_DIR;
-      if (sourceOverride) {
-        const sourceRoot = path.resolve(sourceOverride);
-        if (!(await isRepoRoot(sourceRoot))) {
-          throw new Error(`CODEX_OMNI_SETUP_SOURCE_DIR is not a valid repo root: ${sourceRoot}`);
-        }
-        if (!isSafeGeneratedTarget(parent, target)) {
-          throw new Error(`Refusing to write outside selected install directory: ${target}`);
-        }
-        await this.appendLog("source", `Copying source tree from ${sourceRoot}`);
-        await fs.rm(target, { recursive: true, force: true });
-        await copySourceTree(sourceRoot, target);
-        return target;
       }
 
       const branch = request.repoBranch || DEFAULT_REPO_BRANCH;
@@ -621,37 +631,15 @@ Repair-WinGetPackageManager
     });
   }
 
-  private async launch(
-    powerShell: PowerShellHost,
-    repoRoot: string,
-    shouldLaunch: boolean,
-  ): Promise<void> {
+  private async launch(repoRoot: string, shouldLaunch: boolean): Promise<void> {
     await this.runStep("launch", "Starting Codex OmniRoute", async () => {
       if (!shouldLaunch) {
         this.setStep("launch", "skipped", "Launch skipped by user choice.");
         return;
       }
 
-      const script = path.join(repoRoot, "Start-Codex-OmniRoute.ps1");
-      const child = spawn(
-        powerShell.exe,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          script,
-        ],
-        {
-          cwd: repoRoot,
-          detached: true,
-          stdio: "ignore",
-          windowsHide: false,
-        },
-      );
-      child.unref();
-      return "Launch command started.";
+      const launched = await launchInstalledOmniRoute(repoRoot);
+      return `Codex OmniRoute opened on bridge port ${launched.bridgePort} (pid ${launched.processId}).`;
     });
   }
 
@@ -776,7 +764,15 @@ if ($pkg) {
     const encoded = Buffer.from(script, "utf16le").toString("base64");
     return this.runProcess(
       host.exe,
-      ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded,
+      ],
       { ...options, logStepId: stepId },
     );
   }
@@ -793,6 +789,7 @@ if ($pkg) {
       [
         "-NoLogo",
         "-NoProfile",
+        "-NonInteractive",
         "-ExecutionPolicy",
         "Bypass",
         "-File",
@@ -815,6 +812,7 @@ if ($pkg) {
       const child = spawn(file, args, {
         cwd: options.cwd,
         env: { ...process.env, ...options.env },
+        stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
       let stdout = "";
@@ -852,6 +850,9 @@ if ($pkg) {
         stderr += error.message;
         void this.appendLog(options.logStepId, error.message);
         finish(-1);
+      });
+      child.on("exit", (code) => {
+        setTimeout(() => finish(code ?? 0), 250);
       });
       child.on("close", (code) => finish(code ?? 0));
     });
@@ -969,9 +970,14 @@ async function runRaw(
   file: string,
   args: string[],
   timeoutMs = 30_000,
+  cwd?: string,
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
-    const child = spawn(file, args, { windowsHide: true });
+    const child = spawn(file, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -1003,8 +1009,245 @@ async function runRaw(
       stderr += error.message;
       finish(-1);
     });
+    child.on("exit", (code) => {
+      setTimeout(() => finish(code ?? 0), 250);
+    });
     child.on("close", (code) => finish(code ?? 0));
   });
+}
+
+async function spawnDetached(file: string, args: string[], cwd: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(file, args, {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+    child.once("error", reject);
+  });
+}
+
+async function findPowerShellHost(): Promise<PowerShellHost> {
+  const candidates = unique([
+    path.join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    ...(await whereRaw("powershell.exe")),
+    ...(await whereRaw("pwsh.exe")),
+  ]);
+
+  for (const candidate of candidates) {
+    if (!(await exists(candidate))) {
+      continue;
+    }
+    const result = await runRaw(candidate, [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$PSVersionTable.PSVersion.ToString()",
+    ]);
+    if (result.code === 0) {
+      const version = result.stdout.trim().split(/\r?\n/).at(-1) ?? "unknown";
+      return {
+        exe: candidate,
+        label: `PowerShell ${version}`,
+      };
+    }
+  }
+
+  throw new Error(
+    "PowerShell was not found. Windows PowerShell is a required OS component for Store/AppX repair and OmniRoute setup.",
+  );
+}
+
+async function waitForLaunchedOmniRoute(
+  repoRoot: string,
+  providerPath: string,
+  timeoutMs: number,
+): Promise<LaunchResult> {
+  const deadline = Date.now() + timeoutMs;
+  let lastProcess: OmniRouteProcess | null = null;
+  let lastHealth: BridgeHealthProbe | null = null;
+
+  while (Date.now() < deadline) {
+    lastProcess = await findOmniRouteProcess(repoRoot);
+    lastHealth = await findBridgeHealth(providerPath);
+    if (lastProcess && lastHealth) {
+      return {
+        processId: lastProcess.processId,
+        executablePath: lastProcess.executablePath,
+        bridgePort: lastHealth.port,
+        providerPath: lastHealth.source,
+      };
+    }
+    await delay(750);
+  }
+
+  const processDetail = lastProcess
+    ? `process pid=${lastProcess.processId}`
+    : "process not found";
+  const healthDetail = lastHealth
+    ? `bridge port=${lastHealth.port}`
+    : "matching bridge healthz not found";
+  throw new Error(
+    `Codex OmniRoute did not confirm launch within ${Math.round(
+      timeoutMs / 1000,
+    )} seconds (${processDetail}; ${healthDetail}).`,
+  );
+}
+
+async function findOmniRouteProcess(repoRoot: string): Promise<OmniRouteProcess | null> {
+  const powerShell = await findPowerShellHost();
+  const windowsAppExe = path.join(
+    process.env.LOCALAPPDATA ?? path.join(os.homedir(), "AppData", "Local"),
+    "CodexOmniRoute",
+    "WindowsApp",
+    "app",
+    "Codex.exe",
+  );
+  const script = `
+$exe = ${toPowerShellString(windowsAppExe)}
+$root = ${toPowerShellString(path.resolve(repoRoot))}
+$rows = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+  $_.ExecutablePath -and
+  ([System.String]::Equals([System.IO.Path]::GetFullPath($_.ExecutablePath), [System.IO.Path]::GetFullPath($exe), [System.StringComparison]::OrdinalIgnoreCase)) -and
+  $_.CommandLine -and
+  ($_.CommandLine.IndexOf($root, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) -and
+  ($_.CommandLine -notmatch '--type=')
+} | Select-Object -First 1 @{Name='processId';Expression={$_.ProcessId}}, @{Name='executablePath';Expression={$_.ExecutablePath}}, @{Name='commandLine';Expression={$_.CommandLine}}
+if ($rows) { $rows | ConvertTo-Json -Compress }
+`;
+  const result = await runRaw(
+    powerShell.exe,
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    15_000,
+  );
+  if (result.code !== 0 || !result.stdout.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(result.stdout.trim()) as Partial<OmniRouteProcess>;
+    if (
+      typeof parsed.processId === "number" &&
+      typeof parsed.executablePath === "string" &&
+      typeof parsed.commandLine === "string"
+    ) {
+      return {
+        processId: parsed.processId,
+        executablePath: parsed.executablePath,
+        commandLine: parsed.commandLine,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function findBridgeHealth(providerPath: string): Promise<BridgeHealthProbe | null> {
+  const expectedProvider = path.resolve(providerPath).toLowerCase();
+  for (let port = 20333; port <= 20372; port += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1_500);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/healthz`, {
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        continue;
+      }
+      const health = (await response.json()) as {
+        ok?: boolean;
+        omniroute?: { configured?: boolean; source?: string };
+      };
+      const source = health.omniroute?.source
+        ? path.resolve(health.omniroute.source).toLowerCase()
+        : "";
+      if (health.ok === true && health.omniroute?.configured === true && source === expectedProvider) {
+        return { port, source: health.omniroute.source ?? providerPath };
+      }
+    } catch {
+      // Keep scanning nearby bridge ports.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  return null;
+}
+
+async function focusOmniRouteWindow(processId: number): Promise<void> {
+  const powerShell = await findPowerShellHost();
+  const script = `
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class OmniRouteWindow {
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+do {
+  $proc = Get-Process -Id ${processId} -ErrorAction SilentlyContinue
+  if ($proc -and $proc.MainWindowHandle -and $proc.MainWindowHandle -ne 0) {
+    [void][OmniRouteWindow]::ShowWindowAsync($proc.MainWindowHandle, 9)
+    [void][OmniRouteWindow]::SetForegroundWindow($proc.MainWindowHandle)
+    exit 0
+  }
+  Start-Sleep -Milliseconds 300
+} while ([DateTime]::UtcNow -lt $deadline)
+exit 0
+`;
+  await runRaw(
+    powerShell.exe,
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    20_000,
+  );
+}
+
+async function whereRaw(name: string): Promise<string[]> {
+  const result = await runRaw("where.exe", [name], 15_000);
+  if (result.code !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function toPowerShellString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function exists(filePath: string): Promise<boolean> {

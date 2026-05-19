@@ -65,6 +65,12 @@ const fallbackApi: OmniSetupApi = {
   }),
   selectInstallDir: async () => null,
   startInstall: async () => undefined,
+  launchInstalled: async () => ({
+    processId: 0,
+    executablePath: "",
+    bridgePort: 0,
+    providerPath: "",
+  }),
   openLog: async () => undefined,
   onEvent: () => () => undefined,
 }
@@ -85,6 +91,7 @@ function App() {
     steps: initialSteps,
   })
   const [formError, setFormError] = useState("")
+  const [isFinishing, setIsFinishing] = useState(false)
 
   useEffect(() => {
     let mounted = true
@@ -176,6 +183,18 @@ function App() {
     await validateAndStart()
   }
 
+  const finishAndLaunch = async () => {
+    setFormError("")
+    setIsFinishing(true)
+    try {
+      await setup.launchInstalled()
+      window.close()
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : String(error))
+      setIsFinishing(false)
+    }
+  }
+
   const statusLabel =
     snapshot.status === "success"
       ? "Setup successful"
@@ -186,7 +205,12 @@ function App() {
           : "Ready"
 
   return (
-    <main className="installer-shell">
+    <main
+      className={cn(
+        "installer-shell",
+        screen === "install" && "installer-shell-install"
+      )}
+    >
       <section className="installer-chrome">
         <div className="brand-lockup">
           <div className="brand-mark">
@@ -202,13 +226,18 @@ function App() {
         </Badge>
       </section>
 
-      <section className="installer-grid">
-        <aside className="setup-panel">
+      {screen !== "install" && (
+        <section className="wizard-page">
+          <aside className="setup-panel wizard-panel">
           <div className="panel-heading">
-            <span>01</span>
+            <span>{screen === "location" ? "01" : "02"}</span>
             <div>
-              <h2>Install target</h2>
-              <p>Source, provider config, shortcuts, and local dependencies.</p>
+              <h2>{screen === "location" ? "Install target" : "Provider access"}</h2>
+              <p>
+                {screen === "location"
+                  ? "Choose where Codex OmniRoute will be installed."
+                  : "Add the gateway endpoint and keys before installation starts."}
+              </p>
             </div>
           </div>
 
@@ -328,44 +357,6 @@ function App() {
             </FieldGroup>
           )}
 
-          {screen === "install" && (
-            <div className="install-summary">
-              <div className="summary-meter">
-                <Progress value={progress} />
-                <span>{progress}%</span>
-              </div>
-              <Separator />
-              <div className="summary-copy">
-                <p>{activeStep?.title ?? "Complete"}</p>
-                <span>{activeStep?.detail ?? "All steps finished."}</span>
-              </div>
-              {snapshot.status === "success" && (
-                <div className="finish-actions">
-                  <Button type="button" onClick={() => window.close()}>
-                    <Rocket data-icon="inline-start" />
-                    Finish
-                  </Button>
-                  <Button type="button" variant="secondary" onClick={setup.openLog}>
-                    <Logs data-icon="inline-start" />
-                    Open log
-                  </Button>
-                </div>
-              )}
-              {snapshot.status === "error" && (
-                <div className="finish-actions">
-                  <Button type="button" onClick={retry}>
-                    <RotateCcw data-icon="inline-start" />
-                    Retry
-                  </Button>
-                  <Button type="button" variant="secondary" onClick={setup.openLog}>
-                    <Logs data-icon="inline-start" />
-                    Open log
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-
           {formError && (
             <Alert variant="destructive">
               <AlertTriangle />
@@ -374,8 +365,65 @@ function App() {
             </Alert>
           )}
         </aside>
+        </section>
+      )}
 
-        <section className="roadmap-panel">
+      {screen === "install" && (
+        <section className="install-page">
+          <section className="install-hero">
+            <div className="install-hero-copy">
+              <p className="eyebrow">Live install</p>
+              <h2>{activeStep?.title ?? "Ready to install"}</h2>
+              <p>{activeStep?.detail ?? "The dependency chain is waiting to start."}</p>
+            </div>
+            <div className="install-summary">
+              <div className="summary-meter">
+                <Progress value={progress} />
+                <span>{progress}%</span>
+              </div>
+              <Separator />
+              <div className="summary-copy">
+                <p>
+                  {completedCount}/{snapshot.steps.length} completed
+                </p>
+                <span>{statusLabel}</span>
+              </div>
+              {(snapshot.status === "success" || snapshot.status === "error") && (
+                <div className="finish-actions">
+                  {snapshot.status === "success" ? (
+                    <Button
+                      type="button"
+                      onClick={finishAndLaunch}
+                      disabled={isFinishing}
+                    >
+                      <Rocket data-icon="inline-start" />
+                      Finish
+                    </Button>
+                  ) : (
+                    <Button type="button" onClick={retry}>
+                      <RotateCcw data-icon="inline-start" />
+                      Retry
+                    </Button>
+                  )}
+                  <Button type="button" variant="secondary" onClick={setup.openLog}>
+                    <Logs data-icon="inline-start" />
+                    Open log
+                  </Button>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {formError && (
+            <Alert variant="destructive">
+              <AlertTriangle />
+              <AlertTitle>Setup stopped</AlertTitle>
+              <AlertDescription>{formError}</AlertDescription>
+            </Alert>
+          )}
+
+          <section className="install-workspace">
+            <section className="roadmap-panel install-roadmap">
           <div className="roadmap-header">
             <div>
               <p className="eyebrow">Roadmap</p>
@@ -393,9 +441,9 @@ function App() {
               />
             ))}
           </div>
-        </section>
+            </section>
 
-        <section className="log-panel">
+            <section className="log-panel install-log">
           <div className="roadmap-header">
             <div>
               <p className="eyebrow">Trace</p>
@@ -426,8 +474,10 @@ function App() {
               </div>
             )}
           </ScrollArea>
+            </section>
+          </section>
         </section>
-      </section>
+      )}
     </main>
   )
 }

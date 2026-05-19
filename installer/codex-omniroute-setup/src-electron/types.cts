@@ -51,3 +51,10 @@ export interface PowerShellHost {
   exe: string;
   label: string;
 }
+
+export interface LaunchResult {
+  processId: number;
+  executablePath: string;
+  bridgePort: number;
+  providerPath: string;
+}

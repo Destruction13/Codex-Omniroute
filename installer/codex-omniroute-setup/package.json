@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "electron:dev": "npm run build && electron .",
-    "build": "tsc -b && vite build && tsc -p tsconfig.electron.json",
+    "build": "node ./scripts/clean-build.mjs && tsc -b && vite build && tsc -p tsconfig.electron.json",
     "dist": "npm run build && electron-builder --win portable --x64",
     "package:setup": "npm run dist && node ./scripts/copy-setup.mjs",
     "lint": "eslint .",

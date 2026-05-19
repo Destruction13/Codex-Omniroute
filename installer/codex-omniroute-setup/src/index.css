@@ -141,21 +141,27 @@
 
 .installer-shell {
   display: flex;
+  height: 100vh;
   min-height: 100vh;
   flex-direction: column;
-  gap: 18px;
-  padding: 44px 28px 24px;
+  gap: 14px;
+  overflow: hidden;
+  padding: 40px 22px 20px;
+}
+
+.installer-shell-install {
+  gap: 12px;
 }
 
 .installer-chrome {
   display: flex;
-  min-height: 78px;
+  min-height: 72px;
   align-items: center;
   justify-content: space-between;
   border: 1px solid var(--steel-line);
   border-radius: 8px;
   background: linear-gradient(135deg, var(--panel-strong), var(--panel));
-  padding: 18px 20px;
+  padding: 14px 18px;
   box-shadow: 0 24px 70px oklch(0 0 0 / 38%);
 }
 
@@ -218,15 +224,6 @@ h1 {
   font-weight: 720;
 }
 
-.installer-grid {
-  display: grid;
-  flex: 1;
-  min-height: 0;
-  grid-template-columns: minmax(330px, 0.95fr) minmax(420px, 1.25fr);
-  grid-template-rows: minmax(0, 1fr) 190px;
-  gap: 18px;
-}
-
 .setup-panel,
 .roadmap-panel,
 .log-panel {
@@ -239,10 +236,24 @@ h1 {
 
 .setup-panel {
   display: flex;
-  grid-row: 1 / span 2;
   flex-direction: column;
-  gap: 22px;
+  gap: 18px;
   padding: 22px;
+}
+
+.wizard-page {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  place-items: center;
+  overflow: auto;
+  padding: 2px 0;
+}
+
+.wizard-panel {
+  width: min(700px, 100%);
+  max-height: 100%;
+  overflow: auto;
 }
 
 .panel-heading {
@@ -284,6 +295,10 @@ h1 {
   min-width: 0;
 }
 
+.folder-row .button {
+  flex: 0 0 auto;
+}
+
 .option-stack {
   display: flex;
   flex-direction: column;
@@ -306,9 +321,9 @@ h1 {
 .install-summary {
   display: flex;
   min-height: 0;
-  flex: 1;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
+  min-width: 0;
 }
 
 .summary-meter {
@@ -335,7 +350,7 @@ h1 {
 
 .summary-copy p {
   font-family: var(--font-display);
-  font-size: 1.12rem;
+  font-size: 1rem;
   font-weight: 700;
 }
 
@@ -344,15 +359,66 @@ h1 {
   gap: 10px;
 }
 
+.install-page {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.install-hero {
+  display: grid;
+  min-height: 92px;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
+  gap: 18px;
+  align-items: center;
+  border: 1px solid var(--steel-line);
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--panel-strong), var(--panel));
+  padding: 14px 18px;
+  box-shadow: 0 18px 56px oklch(0 0 0 / 24%);
+}
+
+.install-hero-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.install-hero-copy h2 {
+  overflow: hidden;
+  font-size: 1.28rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.install-hero-copy p:not(.eyebrow) {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.install-workspace {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: minmax(520px, 1.24fr) minmax(300px, 0.76fr);
+  gap: 12px;
+}
+
 .roadmap-panel,
 .log-panel {
-  padding: 18px;
+  padding: 14px 16px;
 }
 
 .roadmap-header {
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .roadmap-list {
@@ -361,10 +427,35 @@ h1 {
   flex-direction: column;
 }
 
+.install-roadmap,
+.install-log {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.install-roadmap .roadmap-list {
+  display: grid;
+  flex: 1;
+  grid-auto-flow: column;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(6, minmax(34px, 1fr));
+  column-gap: 14px;
+  overflow: hidden;
+}
+
 .roadmap-step {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr);
-  min-height: 62px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  min-height: 45px;
+}
+
+.install-roadmap .roadmap-step {
+  min-height: 0;
+}
+
+.install-roadmap .step-copy {
+  padding-bottom: 5px;
 }
 
 .rail {
@@ -376,8 +467,8 @@ h1 {
 .rail-node {
   z-index: 1;
   display: grid;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   place-items: center;
   border: 1px solid var(--steel-line);
   border-radius: 999px;
@@ -386,13 +477,13 @@ h1 {
 }
 
 .rail-node svg {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 
 .rail-line {
   position: absolute;
-  top: 26px;
+  top: 22px;
   bottom: 0;
   width: 1px;
   background: var(--steel-line);
@@ -402,8 +493,8 @@ h1 {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 5px;
-  padding-bottom: 16px;
+  gap: 3px;
+  padding-bottom: 10px;
 }
 
 .step-title {
@@ -413,7 +504,7 @@ h1 {
 
 .step-title h3 {
   overflow: hidden;
-  font-size: 0.94rem;
+  font-size: 0.86rem;
   font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -421,7 +512,7 @@ h1 {
 
 .step-copy p {
   overflow: hidden;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -453,15 +544,17 @@ h1 {
   animation: spin 1s linear infinite;
 }
 
-.log-panel {
-  min-height: 0;
-}
-
 .log-scroll {
   height: 128px;
   border: 1px solid var(--steel-line);
   border-radius: 8px;
   background: oklch(0.1 0.012 220 / 74%);
+}
+
+.install-log .log-scroll {
+  flex: 1;
+  height: auto;
+  min-height: 0;
 }
 
 .log-empty,
@@ -514,6 +607,47 @@ h1 {
 
 .status-running {
   color: var(--primary);
+}
+
+@media (max-height: 700px) {
+  .installer-shell {
+    gap: 10px;
+    padding: 38px 18px 16px;
+  }
+
+  .installer-chrome {
+    min-height: 64px;
+    padding: 12px 16px;
+  }
+
+  .brand-mark {
+    width: 38px;
+    height: 38px;
+  }
+
+  h1 {
+    font-size: 1.42rem;
+  }
+
+  .setup-panel {
+    gap: 14px;
+    padding: 18px;
+  }
+
+  .option-stack {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .install-hero {
+    min-height: 82px;
+    padding: 12px 16px;
+  }
+
+  .roadmap-panel,
+  .log-panel {
+    padding: 12px 14px;
+  }
 }
 
 @keyframes spin {

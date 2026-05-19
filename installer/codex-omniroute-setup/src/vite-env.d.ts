@@ -38,6 +38,13 @@ interface SetupSnapshot {
   steps: SetupStepSnapshot[];
 }
 
+interface LaunchResult {
+  processId: number;
+  executablePath: string;
+  bridgePort: number;
+  providerPath: string;
+}
+
 type SetupEvent =
   | { type: "state"; snapshot: SetupSnapshot }
   | { type: "done"; snapshot: SetupSnapshot }
@@ -47,6 +54,7 @@ interface OmniSetupApi {
   getDefaults: () => Promise<{ installDir: string; snapshot: SetupSnapshot }>;
   selectInstallDir: (current?: string) => Promise<string | null>;
   startInstall: (request: InstallRequest) => Promise<void>;
+  launchInstalled: () => Promise<LaunchResult>;
   openLog: () => Promise<void>;
   onEvent: (callback: (event: SetupEvent) => void) => () => void;
 }
