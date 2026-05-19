@@ -1829,7 +1829,7 @@ async function handleHealth(req, res) {
     LAST_REASONING_DIAGNOSTIC || (await tryReadJson(LAST_REASONING_DIAGNOSTIC_PATH));
 
   res.statusCode = 200;
-  res.setHeader("content-type", "application/json");
+  res.setHeader("content-type", "application/json; charset=utf-8");
   res.end(
     JSON.stringify({
       ok: true,
