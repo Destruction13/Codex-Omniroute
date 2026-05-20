@@ -1,0 +1,68 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Dark slate palette -->
+    <Color x:Key="BgDeepColor">#FF0B1020</Color>
+    <Color x:Key="BgPanelColor">#FF111827</Color>
+    <Color x:Key="BgPanelMutedColor">#FF1F2937</Color>
+    <Color x:Key="BorderColor">#FF1F2937</Color>
+    <Color x:Key="BorderStrongColor">#FF374151</Color>
+
+    <Color x:Key="TextPrimaryColor">#FFF8FAFC</Color>
+    <Color x:Key="TextSecondaryColor">#FFCBD5E1</Color>
+    <Color x:Key="TextMutedColor">#FF94A3B8</Color>
+    <Color x:Key="TextDimColor">#FF64748B</Color>
+
+    <!-- Accent: violet -->
+    <Color x:Key="AccentColor">#FF8B5CF6</Color>
+    <Color x:Key="AccentHoverColor">#FFA78BFA</Color>
+    <Color x:Key="AccentPressedColor">#FF7C3AED</Color>
+    <Color x:Key="AccentDarkColor">#FF6D28D9</Color>
+
+    <!-- Secondary -->
+    <Color x:Key="SuccessColor">#FF10B981</Color>
+    <Color x:Key="WarnColor">#FFFB923C</Color>
+    <Color x:Key="DangerColor">#FFEF4444</Color>
+    <Color x:Key="InfoColor">#FF3B82F6</Color>
+
+    <!-- Brushes -->
+    <SolidColorBrush x:Key="BgDeep" Color="{StaticResource BgDeepColor}" />
+    <SolidColorBrush x:Key="BgPanel" Color="{StaticResource BgPanelColor}" />
+    <SolidColorBrush x:Key="BgPanelMuted" Color="{StaticResource BgPanelMutedColor}" />
+    <SolidColorBrush x:Key="Border" Color="{StaticResource BorderColor}" />
+    <SolidColorBrush x:Key="BorderStrong" Color="{StaticResource BorderStrongColor}" />
+
+    <SolidColorBrush x:Key="TextPrimary" Color="{StaticResource TextPrimaryColor}" />
+    <SolidColorBrush x:Key="TextSecondary" Color="{StaticResource TextSecondaryColor}" />
+    <SolidColorBrush x:Key="TextMuted" Color="{StaticResource TextMutedColor}" />
+    <SolidColorBrush x:Key="TextDim" Color="{StaticResource TextDimColor}" />
+
+    <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}" />
+    <SolidColorBrush x:Key="AccentHover" Color="{StaticResource AccentHoverColor}" />
+    <SolidColorBrush x:Key="AccentPressed" Color="{StaticResource AccentPressedColor}" />
+    <SolidColorBrush x:Key="AccentDark" Color="{StaticResource AccentDarkColor}" />
+
+    <SolidColorBrush x:Key="Success" Color="{StaticResource SuccessColor}" />
+    <SolidColorBrush x:Key="Warn" Color="{StaticResource WarnColor}" />
+    <SolidColorBrush x:Key="Danger" Color="{StaticResource DangerColor}" />
+    <SolidColorBrush x:Key="Info" Color="{StaticResource InfoColor}" />
+
+    <!-- Gradients -->
+    <LinearGradientBrush x:Key="HeroGradient" StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#FF1E1B4B" Offset="0.0" />
+        <GradientStop Color="#FF312E81" Offset="0.5" />
+        <GradientStop Color="#FF7C3AED" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="AccentGradient" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#FF8B5CF6" Offset="0.0" />
+        <GradientStop Color="#FFA78BFA" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="PanelGradient" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#FF111827" Offset="0.0" />
+        <GradientStop Color="#FF0B1020" Offset="1.0" />
+    </LinearGradientBrush>
+
+</ResourceDictionary>

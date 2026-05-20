@@ -1,0 +1,108 @@
+<views:PageBase
+    x:Class="OmniRouteInstaller.Views.SummaryPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:views="clr-namespace:OmniRouteInstaller.Views"
+    Title="Ready to install">
+
+    <Grid Margin="48,28,48,28">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Всё готово к установке" Style="{StaticResource TitleText}" />
+            <TextBlock Margin="0,12,0,0"
+                       Style="{StaticResource SubtitleText}"
+                       Text="Проверь параметры. По нажатию «Установить» начнётся автоматическая установка — обычно занимает 3–7 минут в зависимости от того, что уже стоит в системе." />
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="0,16,0,0">
+            <StackPanel>
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource LabelText}" Text="ПУТЬ УСТАНОВКИ" />
+                        <TextBlock x:Name="PathLabel" Margin="0,8,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource LabelText}" Text="OMNIROUTE PROVIDER" />
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Style="{StaticResource MonoText}" Text="base_url" />
+                            <TextBlock Grid.Column="1" x:Name="BaseUrlLabel" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}" />
+                        </Grid>
+                        <Grid Margin="0,8,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Style="{StaticResource MonoText}" Text="api_key" />
+                            <TextBlock Grid.Column="1" x:Name="ApiKeyMaskLabel" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}" />
+                        </Grid>
+                        <Grid Margin="0,8,0,0" x:Name="ImageKeyRow" Visibility="Collapsed">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="120" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Style="{StaticResource MonoText}" Text="image_key" />
+                            <TextBlock Grid.Column="1" x:Name="ImageKeyMaskLabel" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource Card}" Margin="0,12,0,0">
+                    <StackPanel>
+                        <TextBlock Style="{StaticResource LabelText}" Text="ПЛАН УСТАНОВКИ" />
+                        <StackPanel Margin="0,10,0,0">
+                            <TextBlock Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run Text="1." Foreground="{StaticResource Accent}" /> <Run Text="Распакую Codex OmniRoute в выбранную папку" />
+                            </TextBlock>
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run Text="2." Foreground="{StaticResource Accent}" /> <Run Text="Установлю Node.js LTS, .NET SDK 8 и OpenAI Codex Desktop через winget (если их ещё нет)" />
+                            </TextBlock>
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run Text="3." Foreground="{StaticResource Accent}" /> <Run Text="Запишу omniroute-provider.json" />
+                            </TextBlock>
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run Text="4." Foreground="{StaticResource Accent}" /> <Run Text="Соберу app-сервер прослойку и обновлю дубль приложения" />
+                            </TextBlock>
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run x:Name="StepShortcutsNo" Text="5." Foreground="{StaticResource Accent}" /> <Run x:Name="StepShortcutsTxt" Text="Создам ярлыки на рабочем столе и в Start Menu" />
+                            </TextBlock>
+                            <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}" Foreground="{StaticResource TextPrimary}">
+                                <Run Text="6." Foreground="{StaticResource Accent}" /> <Run Text="Запущу финальную диагностику" />
+                            </TextBlock>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource Card}" Margin="0,12,0,0" Background="{StaticResource BgPanelMuted}">
+                    <TextBlock Style="{StaticResource BodyText}">
+                        <Run Text="ⓘ" Foreground="{StaticResource Accent}" /> <Run Text="Один из шагов — установка Codex Desktop из Microsoft Store через winget. На свежих машинах Store иногда требует одноразовой ручной активации. Если шаг провалится — установщик подскажет, что сделать, и предложит повторить." />
+                    </TextBlock>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Button HorizontalAlignment="Left"
+                    Style="{StaticResource SecondaryButton}"
+                    Content="← Назад"
+                    Click="Back_Click" />
+            <Button HorizontalAlignment="Right"
+                    Style="{StaticResource PrimaryButton}"
+                    Content="Установить →"
+                    Click="Install_Click" />
+        </Grid>
+    </Grid>
+</views:PageBase>
