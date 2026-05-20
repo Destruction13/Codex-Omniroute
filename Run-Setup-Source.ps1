@@ -132,16 +132,23 @@ function Resolve-NodeRuntime {
         throw 'LOCALAPPDATA is required to install the local Node.js runtime.'
     }
 
-    $localNode = Join-Path $env:LOCALAPPDATA 'CodexOmniRoute\deps\node\node.exe'
+    $depsRoot = if ([string]::IsNullOrWhiteSpace($env:CODEX_OMNI_DEPS_ROOT)) {
+        Join-Path $env:LOCALAPPDATA 'CodexOmniRoute\deps'
+    } else {
+        $env:CODEX_OMNI_DEPS_ROOT
+    }
+    $localNode = Join-Path $depsRoot 'node\node.exe'
     if (Test-NodeRuntime -NodeExe $localNode) {
         Write-Setup "Using local Node.js: $localNode"
         return $localNode
     }
 
-    $pathNode = Get-CommandPath -Name 'node.exe'
-    if (Test-NodeRuntime -NodeExe $pathNode) {
-        Write-Setup "Using Node.js from PATH: $pathNode"
-        return $pathNode
+    if ($env:CODEX_OMNI_FORCE_LOCAL_NODE -ne '1') {
+        $pathNode = Get-CommandPath -Name 'node.exe'
+        if (Test-NodeRuntime -NodeExe $pathNode) {
+            Write-Setup "Using Node.js from PATH: $pathNode"
+            return $pathNode
+        }
     }
 
     if (-not (Test-Path -LiteralPath $DepsScript)) {
@@ -149,7 +156,7 @@ function Resolve-NodeRuntime {
     }
 
     Write-Setup 'Node.js 20+ was not found. Installing portable local Node.js, no winget required...'
-    $jsonText = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $DepsScript -NodeOnly -AsJson
+    $jsonText = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $DepsScript -NodeOnly -DepsRoot $depsRoot -AsJson
     if ($LASTEXITCODE -ne 0) {
         throw "Local Node.js installer failed with exit code $LASTEXITCODE."
     }

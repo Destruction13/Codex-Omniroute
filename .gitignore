@@ -50,6 +50,8 @@ tools/__pycache__/
 *.pyc
 mock-transcribe-upstream.log
 .setup-bootstrapper-build/
+.setup-isolated/
+.setup-windows-sandbox/
 
 # OmniRoute MCP/skills catalog cache (last-known-good copy of the remote
 # catalog; refreshed by tools/omniroute-catalog.mjs on every launch when

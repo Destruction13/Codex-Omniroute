@@ -870,6 +870,14 @@ Repair-WinGetPackageManager
   private async getCodexPackage(
     powerShell: PowerShellHost
   ): Promise<unknown | null> {
+    if (process.env.CODEX_OMNI_SETUP_SIMULATE_NO_CODEX === "1") {
+      await this.appendLog(
+        "codex",
+        "Test mode: simulating missing OpenAI.Codex AppX package."
+      )
+      return null
+    }
+
     const script = `
 $pkg = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($pkg) {
@@ -886,6 +894,11 @@ if ($pkg) {
   }
 
   private async resolveWinget(): Promise<string | null> {
+    if (process.env.CODEX_OMNI_SETUP_SIMULATE_NO_WINGET === "1") {
+      await this.appendLog("winget", "Test mode: simulating missing winget.")
+      return null
+    }
+
     const localAppData = process.env.LOCALAPPDATA ?? ""
     const programFiles = process.env.ProgramFiles ?? "C:\\Program Files"
     const candidates = unique([
