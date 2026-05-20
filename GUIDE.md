@@ -9,12 +9,15 @@ only by launcher arguments for that process.
 For normal Windows installs, run the one-click bootstrapper:
 
 ```powershell
-.\Setup.exe
+.\Setup.bat
 ```
 
-The bootstrapper installs local dependencies, prepares the duplicated Windows
-app, creates shortcuts, and runs the verifier. Use the manual steps below only
-when debugging setup itself.
+In a source checkout or ZIP download, `Setup.bat` runs the current Electron
+installer directly from source and doesn't package `Setup.exe`. In a release
+bundle without installer sources, the same bootstrapper runs the packaged
+`Setup.exe`. The bootstrapper installs local dependencies, prepares the
+duplicated Windows app, creates shortcuts, and runs the verifier. Use the
+manual steps below only when debugging setup itself.
 
 ## Manual install
 

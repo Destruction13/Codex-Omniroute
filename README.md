@@ -20,7 +20,7 @@
 <p>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white" alt="Windows 10 or 11" />
   <img src="https://img.shields.io/badge/Codex-Official%20Desktop-111827?style=for-the-badge" alt="Official Codex Desktop" />
-  <img src="https://img.shields.io/badge/Setup.exe-One%20Run-8B5CF6?style=for-the-badge" alt="One run setup" />
+  <img src="https://img.shields.io/badge/Setup.bat-One%20Run-8B5CF6?style=for-the-badge" alt="One run setup" />
   <img src="https://img.shields.io/badge/CODEX_HOME-Shared-10B981?style=for-the-badge" alt="Shared CODEX_HOME" />
   <img src="https://img.shields.io/badge/MCP%20%2B%20Plugins-Ready-14B8A6?style=for-the-badge" alt="MCP and plugins ready" />
 </p>
@@ -30,7 +30,7 @@
     <img src="https://img.shields.io/badge/Download-ZIP-2563EB?style=for-the-badge&logo=github&logoColor=white" alt="Download ZIP" />
   </a>
   <a href="#quick-start">
-    <img src="https://img.shields.io/badge/Quick%20Start-Setup.exe-F97316?style=for-the-badge" alt="Quick start" />
+    <img src="https://img.shields.io/badge/Quick%20Start-Setup.bat-F97316?style=for-the-badge" alt="Quick start" />
   </a>
   <a href="#troubleshooting">
     <img src="https://img.shields.io/badge/Help-Fix%20It-DC2626?style=for-the-badge" alt="Help" />
@@ -113,8 +113,12 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 Открой PowerShell в папке проекта и выполни:
 
 ```powershell
-.\Setup.exe
+.\Setup.bat
 ```
+
+В ZIP/clone-версии `Setup.bat` запускает свежий Electron installer прямо из
+исходников и не собирает новый `Setup.exe`. В release-папке без исходников тот
+же батник запускает готовый `Setup.exe`.
 </td>
 </tr>
 <tr>
@@ -134,15 +138,14 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 </tr>
 </table>
 
-> **Важно:** `Setup.exe` не подписан publisher-сертификатом. Если Windows
-> SmartScreen откроет предупреждение, выбери **More info**, затем
+> **Важно:** если запускаешь `Setup.exe`, он не подписан publisher-сертификатом.
+> Если Windows SmartScreen откроет предупреждение, выбери **More info**, затем
 > **Run anyway**, только если доверяешь этой локальной копии.
 
 ## Что делает setup
 
-`Setup.exe` нужен, чтобы обычный пользователь не собирал окружение руками. Он
-готовит OmniRoute как установленный продукт: зависимости, конфиг, ярлыки и
-проверку запуска.
+`Setup.bat` и `Setup.exe` готовят OmniRoute как установленный продукт:
+зависимости, конфиг, ярлыки и проверку запуска.
 
 | Шаг | Результат |
 | --- | --- |
