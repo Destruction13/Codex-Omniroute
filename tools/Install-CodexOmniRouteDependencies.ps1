@@ -34,6 +34,29 @@ function Write-Step {
     }
 }
 
+function Invoke-DownloadFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$Uri,
+        [Parameter(Mandatory = $true)][string]$OutFile,
+        [int]$Attempts = 4
+    )
+
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -TimeoutSec 120
+            return
+        } catch {
+            if (Test-Path -LiteralPath $OutFile) {
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            }
+            if ($attempt -ge $Attempts) { throw }
+            $delay = [Math]::Min(30, 3 * $attempt)
+            Write-Step "download failed; retrying in $delay seconds ($attempt/$Attempts): $Uri"
+            Start-Sleep -Seconds $delay
+        }
+    }
+}
+
 function Test-DotnetSdk {
     param([AllowNull()][string]$DotnetExe)
     if ([string]::IsNullOrWhiteSpace($DotnetExe)) { return $false }
@@ -93,7 +116,7 @@ function Install-LocalDotnetSdk {
     $installer = Join-Path $DepsRoot 'dotnet-install.ps1'
     $uri = 'https://dot.net/v1/dotnet-install.ps1'
     Write-Step "downloading .NET SDK installer"
-    Invoke-WebRequest -Uri $uri -OutFile $installer -UseBasicParsing
+    Invoke-DownloadFile -Uri $uri -OutFile $installer
 
     Write-Step "installing local .NET SDK 8.0 into $DotnetRoot"
     $psExe = Get-Command pwsh.exe -ErrorAction SilentlyContinue
@@ -132,7 +155,7 @@ function Resolve-DotnetSdkArchive {
 
     $metadataPath = Join-Path $DepsRoot 'dotnet-8-releases.json'
     Write-Step "downloading .NET 8 release metadata"
-    Invoke-WebRequest -Uri 'https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json' -OutFile $metadataPath -UseBasicParsing
+    Invoke-DownloadFile -Uri 'https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json' -OutFile $metadataPath
     $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
     $rid = "win-$(Get-DotnetDistArch)"
     $expectedName = "dotnet-sdk-$rid.zip"
@@ -170,7 +193,7 @@ function Install-LocalDotnetSdkArchive {
     Assert-ChildPath -Parent $DepsRoot -Child $archivePath
 
     Write-Step "downloading .NET SDK $($archive.Version) for $($archive.Rid)"
-    Invoke-WebRequest -Uri $archive.Url -OutFile $archivePath -UseBasicParsing
+    Invoke-DownloadFile -Uri $archive.Url -OutFile $archivePath
 
     if (-not [string]::IsNullOrWhiteSpace($archive.Hash)) {
         $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA512).Hash.ToLowerInvariant()
@@ -210,7 +233,7 @@ function Resolve-NodeVersion {
 
     $indexPath = Join-Path $DepsRoot 'node-dist-index.json'
     Write-Step "downloading Node.js release index"
-    Invoke-WebRequest -Uri 'https://nodejs.org/dist/index.json' -OutFile $indexPath -UseBasicParsing
+    Invoke-DownloadFile -Uri 'https://nodejs.org/dist/index.json' -OutFile $indexPath
     $entries = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json -ErrorAction Stop
     foreach ($entry in $entries) {
         $version = [string]$entry.version
@@ -243,7 +266,7 @@ function Install-LocalNodeRuntime {
     Assert-ChildPath -Parent $DepsRoot -Child $archivePath
     Assert-ChildPath -Parent $DepsRoot -Child $extractRoot
     Write-Step "downloading Node.js $version for win-$arch"
-    Invoke-WebRequest -Uri $uri -OutFile $archivePath -UseBasicParsing
+    Invoke-DownloadFile -Uri $uri -OutFile $archivePath
 
     if (Test-Path -LiteralPath $extractRoot) {
         Remove-Item -LiteralPath $extractRoot -Recurse -Force
