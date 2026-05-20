@@ -16,6 +16,7 @@
 param(
     [string]$DepsRoot = '',
     [switch]$CheckOnly,
+    [switch]$NodeOnly,
     [switch]$Quiet,
     [switch]$AsJson
 )
@@ -198,7 +199,10 @@ $forceLocalNode = $env:CODEX_OMNI_FORCE_LOCAL_NODE -eq '1'
 
 $dotnetExe = ''
 $dotnetSource = ''
-if (Test-DotnetSdk -DotnetExe $localDotnet) {
+if ($NodeOnly) {
+    $dotnetExe = ''
+    $dotnetSource = 'skipped-node-only'
+} elseif (Test-DotnetSdk -DotnetExe $localDotnet) {
     $dotnetExe = $localDotnet
     $dotnetSource = 'local'
 } elseif (-not $CheckOnly) {
@@ -213,7 +217,7 @@ if (Test-DotnetSdk -DotnetExe $localDotnet) {
     $dotnetSource = 'path'
 }
 
-$dotnetOk = -not [string]::IsNullOrWhiteSpace($dotnetExe)
+$dotnetOk = $NodeOnly -or (-not [string]::IsNullOrWhiteSpace($dotnetExe))
 
 $nodeExe = ''
 $nodeSource = ''

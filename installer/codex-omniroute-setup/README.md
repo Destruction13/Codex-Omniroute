@@ -29,7 +29,10 @@ packaging a new `Setup.exe`.
 ```
 
 The source runner installs missing npm dependencies, builds the installer UI,
-and opens Electron from `installer/codex-omniroute-setup`.
+and opens Electron from `installer/codex-omniroute-setup`. If Node.js 20 or
+newer isn't available, it downloads a portable local Node.js runtime under
+`%LOCALAPPDATA%\CodexOmniRoute\deps\node`; it doesn't require `winget` for this
+source bootstrap step.
 
 ## Packaging
 

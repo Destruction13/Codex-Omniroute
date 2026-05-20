@@ -127,7 +127,8 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 
 В распакованной папке запусти **`Setup.bat`**. В ZIP/clone-версии он открывает
 актуальный Electron installer прямо из исходников и не собирает новый
-`Setup.exe`.
+`Setup.exe`. Если Node.js 20+ ещё нет, батник скачает portable Node.js в
+`%LOCALAPPDATA%\CodexOmniRoute\deps\node`; `winget` для этого шага не нужен.
 
 ```powershell
 .\Setup.bat
