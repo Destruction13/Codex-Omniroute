@@ -4,8 +4,6 @@
   "api_key": "REDACTED_PUT_YOUR_OMNIROUTE_KEY_HERE",
   "model_prefix": "cx/",
   "default_model": "gpt-5.5",
-  "image_api_key": "",
-  "image_model": "chatgpt-web/gpt-5.3-instant",
   "model_aliases": {
     "gpt-5.5": "gpt-5.5-xhigh"
   },

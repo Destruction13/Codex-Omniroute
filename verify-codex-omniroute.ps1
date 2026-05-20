@@ -96,6 +96,15 @@ function Get-PSHost {
     return $null
 }
 
+function Get-WindowsPowerShellHost {
+    if (-not (Test-WindowsHost)) { return $null }
+    $candidate = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    $cmd = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
 function Get-OfficialCodexHome {
     $root = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
     if ([string]::IsNullOrWhiteSpace($root)) { return $null }
@@ -192,6 +201,46 @@ function Get-RuntimeOverrideArgs {
     )
 }
 
+function ConvertTo-ProcessArgument {
+    param([AllowEmptyString()][string]$Argument)
+
+    $quote = [char]34
+    $backslash = [char]92
+    $specialChars = [char[]]@([char]32, [char]9, [char]10, [char]13, $quote)
+    if (($Argument.Length -gt 0) -and ($Argument.IndexOfAny($specialChars) -lt 0)) {
+        return $Argument
+    }
+
+    $builder = [System.Text.StringBuilder]::new()
+    [void]$builder.Append($quote)
+    $backslashCount = 0
+    foreach ($ch in $Argument.ToCharArray()) {
+        if ($ch -eq $backslash) {
+            $backslashCount++
+            continue
+        }
+        if ($ch -eq $quote) {
+            if ($backslashCount -gt 0) {
+                [void]$builder.Append($backslash, $backslashCount * 2)
+                $backslashCount = 0
+            }
+            [void]$builder.Append($backslash)
+            [void]$builder.Append($quote)
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            [void]$builder.Append($backslash, $backslashCount)
+            $backslashCount = 0
+        }
+        [void]$builder.Append($ch)
+    }
+    if ($backslashCount -gt 0) {
+        [void]$builder.Append($backslash, $backslashCount * 2)
+    }
+    [void]$builder.Append($quote)
+    return $builder.ToString()
+}
+
 function Invoke-CodexExecLiveSmoke {
     param(
         [Parameter(Mandatory = $true)][string]$CodexCli,
@@ -208,9 +257,7 @@ function Invoke-CodexExecLiveSmoke {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.Environment['CODEX_HOME'] = $CodexHome
-    foreach ($arg in @('exec') + $OverrideArgs + @('--skip-git-repo-check', 'Reply with exactly: omniroute-live-ok')) {
-        [void]$psi.ArgumentList.Add($arg)
-    }
+    $psi.Arguments = ((@('exec') + $OverrideArgs + @('--skip-git-repo-check', 'Reply with exactly: omniroute-live-ok')) | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join ' '
     $proc = [System.Diagnostics.Process]::Start($psi)
     $completed = $proc.WaitForExit($TimeoutSec * 1000)
     if (-not $completed) {
@@ -222,6 +269,44 @@ function Invoke-CodexExecLiveSmoke {
     $text = (($stdout + "`n" + $stderr).Trim())
     if ($text.Length -gt 240) { $text = $text.Substring(0, 240) + '...' }
     return [pscustomobject]@{ Ok = ($proc.ExitCode -eq 0); Detail = "exit=$($proc.ExitCode) $text" }
+}
+
+function Invoke-ProcessWithTimeout {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileName,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [hashtable]$Environment = @{},
+        [int]$TimeoutSec = 30
+    )
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FileName
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.Arguments = ($Arguments | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) -join ' '
+    foreach ($key in $Environment.Keys) {
+        $psi.Environment[$key] = [string]$Environment[$key]
+    }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+    $completed = $proc.WaitForExit($TimeoutSec * 1000)
+    if (-not $completed) {
+        try { $proc.Kill($true) } catch { try { $proc.Kill() } catch {} }
+    }
+    try { $proc.WaitForExit(5000) | Out-Null } catch {}
+    $stdout = try { $stdoutTask.Result } catch { '' }
+    $stderr = try { $stderrTask.Result } catch { '' }
+    $text = (($stdout + "`n" + $stderr).Trim())
+    return [pscustomobject]@{
+        Completed = $completed
+        ExitCode = if ($completed) { $proc.ExitCode } else { $null }
+        Output = $text
+    }
 }
 
 $psHost = Get-PSHost
@@ -270,7 +355,7 @@ if (Test-Path -LiteralPath $dependencySetup) {
 $launcherOutput = @()
 $launcherExit = $null
 try {
-    $launcherOutput = & $psHost -NoProfile -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort 2>&1
+    & $psHost -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $omniLauncher -NoCodex -BridgePort $BridgePort
     $launcherExit = $LASTEXITCODE
 } catch {
     $launcherOutput = @($_.Exception.Message)
@@ -280,7 +365,9 @@ try {
 if ($launcherExit -eq 0) {
     Add-Result 'omniroute-launcher-nocodex' 'PASS' 'launcher started bridge without GUI'
 } else {
-    Add-Result 'omniroute-launcher-nocodex' 'FAIL' (($launcherOutput | Out-String).Trim())
+    $detail = (($launcherOutput | Out-String).Trim())
+    if ([string]::IsNullOrWhiteSpace($detail)) { $detail = "launcher exited with code $launcherExit" }
+    Add-Result 'omniroute-launcher-nocodex' 'FAIL' $detail
 }
 
 $active = Get-BridgeHealth -PreferredPort $BridgePort
@@ -457,13 +544,23 @@ if ($applyPatchFallback -and (Test-Path -LiteralPath $applyPatchFallback)) {
         $patch = "*** Begin Patch`n*** Update File: $patchPath`n@@`n-original`n+changed-by-verifier`n*** End Patch`n"
         $patchFile = Join-Path $tmpRoot 'patch.apply'
         [System.IO.File]::WriteAllText($patchFile, $patch, [System.Text.UTF8Encoding]::new($false))
-        $output = & $psHost -NoProfile -ExecutionPolicy Bypass -File $applyPatchFallback -PatchFile $patchFile 2>&1
-        if (($LASTEXITCODE -eq 0) -and (([System.IO.File]::ReadAllText($sample)).Trim() -eq 'changed-by-verifier')) {
+        $applyPatchHost = Get-WindowsPowerShellHost
+        if (-not $applyPatchHost) { $applyPatchHost = $psHost }
+        $applyResult = Invoke-ProcessWithTimeout `
+            -FileName $applyPatchHost `
+            -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $applyPatchFallback, '-PatchFile', $patchFile) `
+            -WorkingDirectory $scriptRoot `
+            -Environment @{ CODEX_OMNI_FORCE_DIRECT_APPLY_PATCH = '1' } `
+            -TimeoutSec 20
+        $applied = (([System.IO.File]::ReadAllText($sample)).Trim() -eq 'changed-by-verifier')
+        if ($applyResult.Completed -and ($applyResult.ExitCode -eq 0) -and $applied) {
             Add-Result 'apply-patch-local-fallback' 'PASS' 'local apply_patch fallback applied a safe temp-file patch'
+        } elseif ((-not $applyResult.Completed) -and $applied) {
+            Add-Result 'apply-patch-local-fallback' 'WARN' 'fallback applied the temp-file patch but did not exit within 20 seconds; verifier killed the helper'
         } else {
-            $detail = ($output | Out-String).Trim()
+            $detail = $applyResult.Output
             if ($detail.Length -gt 160) { $detail = $detail.Substring(0, 160) + '...' }
-            Add-Result 'apply-patch-local-fallback' 'FAIL' "fallback failed: $detail"
+            Add-Result 'apply-patch-local-fallback' 'FAIL' "fallback failed: exit=$($applyResult.ExitCode) completed=$($applyResult.Completed) $detail"
         }
     } catch {
         Add-Result 'apply-patch-local-fallback' 'FAIL' "fallback threw: $($_.Exception.Message)"

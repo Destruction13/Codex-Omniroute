@@ -113,7 +113,7 @@ Routes:
 | --- | --- | --- |
 | `/v1/responses` | OmniRoute | Main reasoning. Increments `main_reasoning_hits`. |
 | `/v1/chat/completions` | OmniRoute | Compatibility route. |
-| `/v1/images/generations` | OmniRoute image lane | Uses `CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY` when set. |
+| `/v1/images/generations` | OmniRoute image lane | Reuses the main provider API key. |
 | `/v1/images/edits` | OmniRoute image lane | Supports JSON and multipart model normalization. |
 | `/v1/responses/compact` | Official Codex/OpenAI | Not rerouted to OmniRoute. |
 | `/v1/audio/transcriptions`, `/transcribe` | Official Codex/OpenAI | Dictation remains official. |

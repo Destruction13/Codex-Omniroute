@@ -24,8 +24,7 @@ param(
     [switch]$SkipVerify,
     [switch]$SkipShortcuts,
     [string]$ProviderBaseUrl = '',
-    [string]$ProviderApiKey = '',
-    [string]$ProviderImageApiKey = ''
+    [string]$ProviderApiKey = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -178,8 +177,7 @@ function Save-ProviderJson {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$ApiKey,
-        [string]$ImageApiKey = ''
+        [Parameter(Mandatory = $true)][string]$ApiKey
     )
 
     $provider = [ordered]@{
@@ -191,8 +189,6 @@ function Save-ProviderJson {
         'model_aliases' = [ordered]@{
             'gpt-5.5' = 'gpt-5.5-xhigh'
         }
-        'image_api_key' = $ImageApiKey
-        'image_model' = 'chatgpt-web/gpt-5.3-instant'
         'headers' = @{
             'x-codex-omniroute-client' = 'codex-omniroute-bridge'
         }
@@ -209,7 +205,6 @@ function Ensure-ProviderConfig {
     $providerPath = Join-Path $Root 'omniroute-provider.json'
     if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) { $ProviderBaseUrl = $env:CODEX_OMNI_OMNIROUTE_BASE_URL }
     if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) { $ProviderApiKey = $env:CODEX_OMNI_OMNIROUTE_API_KEY }
-    if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) { $ProviderImageApiKey = $env:CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY }
 
     if ($NonInteractive) {
         if ((Test-Path -LiteralPath $providerPath) -and
@@ -231,13 +226,9 @@ function Ensure-ProviderConfig {
         if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) {
             $ProviderApiKey = Read-SecretValue -Prompt 'OmniRoute API key'
         }
-        if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) {
-            $ProviderImageApiKey = Read-Host 'Optional image API key [Enter to reuse main key]'
-            if ($null -ne $ProviderImageApiKey) { $ProviderImageApiKey = $ProviderImageApiKey.Trim() }
-        }
     }
 
-    Save-ProviderJson -Path $providerPath -BaseUrl $ProviderBaseUrl -ApiKey $ProviderApiKey -ImageApiKey $ProviderImageApiKey
+    Save-ProviderJson -Path $providerPath -BaseUrl $ProviderBaseUrl -ApiKey $ProviderApiKey
     Write-OK "Wrote provider config: $providerPath"
     return $providerPath
 }
@@ -276,6 +267,28 @@ function Create-Shortcut {
     if ($WorkingDirectory) { $shortcut.WorkingDirectory = $WorkingDirectory }
     if ($IconLocation) { $shortcut.IconLocation = $IconLocation }
     $shortcut.Save()
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Shortcut was not created: $Path"
+    }
+    return [System.IO.Path]::GetFullPath($Path)
+}
+
+function Get-UniqueExistingDirectories {
+    param([string[]]$Paths)
+
+    $seen = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in $Paths) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        try {
+            $full = [System.IO.Path]::GetFullPath($candidate)
+            if (-not (Test-Path -LiteralPath $full)) {
+                New-Item -ItemType Directory -Path $full -Force | Out-Null
+            }
+            if ($seen.Add($full)) { [void]$result.Add($full) }
+        } catch {}
+    }
+    return $result.ToArray()
 }
 
 function Install-Shortcuts {
@@ -287,15 +300,37 @@ function Install-Shortcuts {
     $omniBat = Join-Path $Root 'Start-Codex-OmniRoute.bat'
     $officialBat = Join-Path $Root 'Start-Codex-Official.bat'
     $icon = Join-Path $CodexPackage.InstallLocation 'app\Codex.exe'
-    $desktop = [Environment]::GetFolderPath('DesktopDirectory')
     $programs = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
     $folder = Join-Path $programs 'Codex OmniRoute'
+    $desktopCandidates = Get-UniqueExistingDirectories @(
+        [Environment]::GetFolderPath('DesktopDirectory'),
+        [Environment]::GetFolderPath('Desktop'),
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'Desktop' } else { '' }),
+        $(if ($env:OneDrive) { Join-Path $env:OneDrive 'Desktop' } else { '' }),
+        $(if ($env:PUBLIC) { Join-Path $env:PUBLIC 'Desktop' } else { '' })
+    )
 
-    Create-Shortcut -Path (Join-Path $desktop 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
-    Create-Shortcut -Path (Join-Path $desktop 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
-    Create-Shortcut -Path (Join-Path $folder 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
-    Create-Shortcut -Path (Join-Path $folder 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
-    Write-OK 'Desktop and Start Menu shortcuts created.'
+    $desktopCreated = $false
+    $desktopErrors = New-Object System.Collections.Generic.List[string]
+    foreach ($desktop in $desktopCandidates) {
+        try {
+            $omniDesktop = Create-Shortcut -Path (Join-Path $desktop 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
+            $officialDesktop = Create-Shortcut -Path (Join-Path $desktop 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
+            Write-OK "Desktop shortcuts created: $omniDesktop; $officialDesktop"
+            $desktopCreated = $true
+            break
+        } catch {
+            [void]$desktopErrors.Add(("{0}: {1}" -f $desktop, $_.Exception.Message))
+        }
+    }
+
+    if (-not $desktopCreated) {
+        throw ("Desktop shortcut creation failed. Tried: {0}" -f ($desktopErrors.ToArray() -join ' | '))
+    }
+
+    $omniStart = Create-Shortcut -Path (Join-Path $folder 'Codex OmniRoute.lnk') -TargetPath $omniBat -WorkingDirectory $Root -IconLocation $icon
+    $officialStart = Create-Shortcut -Path (Join-Path $folder 'Codex Official.lnk') -TargetPath $officialBat -WorkingDirectory $Root -IconLocation $icon
+    Write-OK "Start Menu shortcuts created: $omniStart; $officialStart"
 }
 
 function Prepare-Launcher {

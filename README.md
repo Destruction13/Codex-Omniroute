@@ -76,9 +76,12 @@
 </td>
 </tr>
 <tr>
-<td align="center">
-  <h3>🖼 Image lane</h3>
-  <p>Картинки идут через отдельный <code>image_api_key</code>. Большие inline-изображения уходят в локальный кэш и заменяются placeholder'ами.</p>
+<td align="center"><b>4</b></td>
+<td>
+<b>Введи OmniRoute credentials.</b><br />
+Когда setup спросит, вставь OmniRoute base URL и API key. Setup проверит,
+что ключ реально существует в OmniRoute **API Manager**, а endpoint отдаёт
+нужную модель, до скачивания и установки.
 </td>
 <td align="center">
   <h3>⚡ One-click setup</h3>
@@ -104,7 +107,15 @@
 <tr><td><h3>1️⃣ &nbsp; Поставь OpenAI Codex Desktop</h3></td></tr>
 <tr><td>
 
-Найди **OpenAI Codex** в Microsoft Store, установи, войди один раз в свой аккаунт. Codex сохранит auth и можно закрывать.
+| Шаг | Результат |
+| --- | --- |
+| Проверяет официальный Codex | Убеждается, что официальный Desktop app установлен и готов. |
+| Проверяет OmniRoute API Manager | Останавливает setup, если ключ не найден в API Manager или endpoint не проходит `/models`. |
+| Ставит зависимости | Сам ставит локальные Node.js и .NET SDK, если их нет. |
+| Спрашивает OmniRoute доступ | Сохраняет base URL и API key в локальный config. |
+| Готовит отдельное окно | Создаёт рабочий запуск **Codex OmniRoute** рядом с официальным Codex. |
+| Создаёт ярлыки | Добавляет **Codex OmniRoute** и **Codex Official** на рабочий стол и в Start Menu. |
+| Проверяет запуск | Запускает verifier и показывает, что bridge, MCP и tools видны. |
 
 <a href="https://apps.microsoft.com/search?query=openai+codex"><img src="https://img.shields.io/badge/%D0%9E%D1%82%D0%BA%D1%80%D1%8B%D1%82%D1%8C_Microsoft_Store-%D0%9D%D0%B0%D0%B9%D1%82%D0%B8_OpenAI_Codex-0078D6?style=for-the-badge&logo=microsoftstore&logoColor=white" alt="Microsoft Store" /></a>
 
@@ -130,7 +141,19 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 
 <a href="https://github.com/Destruction13/Codex-Omniroute/issues/new?title=OmniRoute+access+request&body=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82!+%D0%A5%D0%BE%D1%87%D1%83+%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF+%D0%BA+OmniRoute.+Use+case:+"><img src="https://img.shields.io/badge/%D0%97%D0%B0%D0%BF%D1%80%D0%BE%D1%81%D0%B8%D1%82%D1%8C_%D0%B4%D0%BE%D1%81%D1%82%D1%83%D0%BF-Open_Issue-8B5CF6?style=for-the-badge&logo=github&logoColor=white" alt="Request access" /></a>
 
-</td></tr>
+Минимальная форма:
+
+```json
+{
+  "base_url": "https://your-omniroute.example/v1",
+  "api_key": "YOUR_OMNIROUTE_KEY",
+  "model_prefix": "cx/",
+  "default_model": "gpt-5.5",
+  "model_aliases": {
+    "gpt-5.5": "gpt-5.5-xhigh"
+  }
+}
+```
 
 <tr><td><h3>4️⃣ &nbsp; Двойной клик на Setup.exe</h3></td></tr>
 <tr><td>

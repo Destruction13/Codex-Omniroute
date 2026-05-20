@@ -1829,7 +1829,7 @@ async function handleHealth(req, res) {
     LAST_REASONING_DIAGNOSTIC || (await tryReadJson(LAST_REASONING_DIAGNOSTIC_PATH));
 
   res.statusCode = 200;
-  res.setHeader("content-type", "application/json");
+  res.setHeader("content-type", "application/json; charset=utf-8");
   res.end(
     JSON.stringify({
       ok: true,
@@ -2023,7 +2023,7 @@ async function handleOmniRouteImage(req, res, suffix) {
     res.end(
       JSON.stringify({
         error: "omniroute_image_not_configured",
-        detail: "Set CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY, OMNIROUTE_IMAGE_API_KEY, or provider api_key.",
+        detail: "Set the OmniRoute provider api_key.",
       }),
     );
     return;
