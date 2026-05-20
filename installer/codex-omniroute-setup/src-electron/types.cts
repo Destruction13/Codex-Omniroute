@@ -26,6 +26,17 @@ export interface InstallRequest {
   skipShortcuts?: boolean;
 }
 
+export interface ProviderVerificationRequest {
+  baseUrl: string;
+  apiKey: string;
+}
+
+export interface ProviderVerificationResult {
+  endpoint: string;
+  matchedModel: string;
+  modelCount: number;
+}
+
 export interface SetupSnapshot {
   status: "idle" | "running" | "success" | "error";
   installRoot?: string;

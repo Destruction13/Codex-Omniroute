@@ -49,15 +49,15 @@ import {
 import { cn } from "@/lib/utils"
 
 const initialSteps: SetupStepSnapshot[] = [
+  ["api", "Access key verification"],
   ["preflight", "Windows preflight"],
   ["powershell", "PowerShell host"],
-  ["api", "OmniRoute API Manager key"],
   ["winget", "App Installer / winget"],
   ["codex", "Official Codex Store app"],
   ["recommended", "Windows developer tools"],
   ["source", "Codex OmniRoute source"],
   ["local-deps", "Local Node.js and .NET"],
-  ["provider", "OmniRoute provider config"],
+  ["provider", "Provider config"],
   ["gateway", "Gateway, wrapper, shortcuts"],
   ["verify", "Architecture verifier"],
   ["launch", "Launch Codex OmniRoute"],
@@ -75,6 +75,11 @@ const fallbackApi: OmniSetupApi = {
     snapshot: { status: "idle", steps: initialSteps },
   }),
   selectInstallDir: async () => null,
+  verifyProvider: async () => ({
+    endpoint: "",
+    matchedModel: "",
+    modelCount: 0,
+  }),
   startInstall: async () => undefined,
   launchInstalled: async () => ({
     processId: 0,
@@ -94,18 +99,20 @@ const englishMessages = {
   actionLogFile: "Log file",
   actionOpenLog: "Open log",
   actionRetry: "Retry",
+  actionVerifying: "Verifying...",
   actionVerifyInstall: "Verify and install",
   activeDetailFallback: "The dependency chain is waiting to start.",
   activeReady: "Ready to install",
   alertSetupStopped: "Setup stopped",
+  alertVerificationFailed: "Verification failed",
   brandEyebrow: "Windows bootstrapper",
   completed: "completed",
   credentialsDescription:
-    "Add the gateway endpoint and API key before installation starts.",
-  credentialsTitle: "Provider access",
+    "Enter the service URL and access key before installation starts.",
+  credentialsTitle: "Service access",
   dependencyChain: "Dependency chain",
-  fieldApiKey: "API key",
-  fieldBaseUrl: "Base URL",
+  fieldApiKey: "Access key",
+  fieldBaseUrl: "Service URL",
   fieldFolder: "Folder",
   finalSourcePath: "Final source path",
   installDeveloperTools: "Install Windows developer tools",
@@ -125,14 +132,14 @@ const englishMessages = {
   statusIdle: "Ready",
   statusRunning: "Installing",
   statusSuccess: "Setup successful",
-  stepApi: "OmniRoute API Manager key",
+  stepApi: "Access key verification",
   stepCodex: "Official Codex Store app",
   stepGateway: "Gateway, wrapper, shortcuts",
   stepLaunch: "Launch Codex OmniRoute",
   stepLocalDeps: "Local Node.js and .NET",
   stepPowerShell: "PowerShell host",
   stepPreflight: "Windows preflight",
-  stepProvider: "OmniRoute provider config",
+  stepProvider: "Provider config",
   stepRecommended: "Windows developer tools",
   stepSource: "Codex OmniRoute source",
   stepStatusError: "error",
@@ -145,10 +152,12 @@ const englishMessages = {
   stepWinget: "App Installer / winget",
   tooltipInstallFolder: "Select a parent install folder.",
   trace: "Trace",
-  validationApiKey: "API key is required.",
-  validationBaseUrl: "Enter a valid Base URL.",
-  validationBaseUrlProtocol: "Base URL must start with http:// or https://.",
+  validationApiKey: "Access key is required.",
+  validationBaseUrl: "Enter a valid service URL.",
+  validationBaseUrlProtocol: "Service URL must start with http:// or https://.",
   validationInstallFolder: "Select an install folder.",
+  verificationFailed:
+    "Key verification failed. Check the access key and try again.",
   waiting: "Waiting",
 } as const
 
@@ -165,18 +174,20 @@ const translations: Record<LanguageCode, Record<TranslationKey, string>> = {
     actionLogFile: "Файл лога",
     actionOpenLog: "Открыть лог",
     actionRetry: "Повторить",
+    actionVerifying: "Проверяю...",
     actionVerifyInstall: "Проверить и установить",
     activeDetailFallback: "Цепочка зависимостей ждёт запуска.",
     activeReady: "Готово к установке",
     alertSetupStopped: "Установка остановлена",
+    alertVerificationFailed: "Верификация не пройдена",
     brandEyebrow: "Windows установщик",
     completed: "завершено",
     credentialsDescription:
-      "Добавь endpoint шлюза и API ключ перед началом установки.",
-    credentialsTitle: "Доступ к провайдеру",
+      "Введи адрес сервиса и ключ доступа перед началом установки.",
+    credentialsTitle: "Доступ к сервису",
     dependencyChain: "Цепочка зависимостей",
-    fieldApiKey: "API ключ",
-    fieldBaseUrl: "Base URL",
+    fieldApiKey: "Ключ доступа",
+    fieldBaseUrl: "Адрес сервиса",
     fieldFolder: "Папка",
     finalSourcePath: "Итоговый путь исходников",
     installDeveloperTools: "Установить инструменты разработчика Windows",
@@ -196,14 +207,14 @@ const translations: Record<LanguageCode, Record<TranslationKey, string>> = {
     statusIdle: "Готов",
     statusRunning: "Установка",
     statusSuccess: "Установка успешна",
-    stepApi: "Ключ OmniRoute API Manager",
+    stepApi: "Проверка ключа доступа",
     stepCodex: "Официальное приложение Codex Store",
     stepGateway: "Gateway, wrapper и ярлыки",
     stepLaunch: "Запуск Codex OmniRoute",
     stepLocalDeps: "Локальные Node.js и .NET",
     stepPowerShell: "PowerShell host",
     stepPreflight: "Проверка Windows",
-    stepProvider: "Конфиг провайдера OmniRoute",
+    stepProvider: "Конфиг провайдера",
     stepRecommended: "Инструменты разработчика Windows",
     stepSource: "Исходники Codex OmniRoute",
     stepStatusError: "ошибка",
@@ -216,11 +227,13 @@ const translations: Record<LanguageCode, Record<TranslationKey, string>> = {
     stepWinget: "App Installer / winget",
     tooltipInstallFolder: "Выбери родительскую папку для установки.",
     trace: "Трассировка",
-    validationApiKey: "API ключ обязателен.",
-    validationBaseUrl: "Введи корректный Base URL.",
+    validationApiKey: "Ключ доступа обязателен.",
+    validationBaseUrl: "Введи корректный адрес сервиса.",
     validationBaseUrlProtocol:
-      "Base URL должен начинаться с http:// или https://.",
+      "Адрес сервиса должен начинаться с http:// или https://.",
     validationInstallFolder: "Выбери папку установки.",
+    verificationFailed:
+      "Верификация не пройдена. Проверь ключ доступа и попробуй снова.",
     waiting: "Ожидание",
   },
 }
@@ -270,6 +283,7 @@ function App() {
   })
   const [formError, setFormError] = useState("")
   const [isFinishing, setIsFinishing] = useState(false)
+  const [isVerifying, setIsVerifying] = useState(false)
   const [language, setLanguage] = useState<LanguageCode>("en")
   const t = (key: TranslationKey) => translations[language][key]
   const getStepTitle = (step: SetupStepSnapshot) => {
@@ -348,6 +362,18 @@ function App() {
     if (!apiKey.trim()) {
       setFormError(t("validationApiKey"))
       return
+    }
+    setIsVerifying(true)
+    try {
+      await setup.verifyProvider({
+        baseUrl,
+        apiKey,
+      })
+    } catch {
+      setFormError(t("verificationFailed"))
+      return
+    } finally {
+      setIsVerifying(false)
     }
     setScreen("install")
     await setup.startInstall({
@@ -532,7 +558,7 @@ function App() {
                     id="baseUrl"
                     value={baseUrl}
                     onChange={(event) => setBaseUrl(event.target.value)}
-                    placeholder="https://your-omniroute.example/v1"
+                    placeholder="https://service.example/v1"
                     spellCheck={false}
                   />
                 </Field>
@@ -550,14 +576,25 @@ function App() {
                   <Button
                     type="button"
                     variant="secondary"
+                    disabled={isVerifying}
                     onClick={() => setScreen("location")}
                   >
                     <ChevronLeft data-icon="inline-start" />
                     {t("actionBack")}
                   </Button>
-                  <Button type="button" onClick={validateAndStart}>
-                    <ShieldCheck data-icon="inline-start" />
-                    {t("actionVerifyInstall")}
+                  <Button
+                    type="button"
+                    onClick={validateAndStart}
+                    disabled={isVerifying}
+                  >
+                    {isVerifying ? (
+                      <LoaderCircle className="spin" data-icon="inline-start" />
+                    ) : (
+                      <ShieldCheck data-icon="inline-start" />
+                    )}
+                    {isVerifying
+                      ? t("actionVerifying")
+                      : t("actionVerifyInstall")}
                   </Button>
                 </div>
               </FieldGroup>
@@ -566,7 +603,11 @@ function App() {
             {formError && (
               <Alert variant="destructive">
                 <AlertTriangle />
-                <AlertTitle>{t("alertSetupStopped")}</AlertTitle>
+                <AlertTitle>
+                  {screen === "credentials"
+                    ? t("alertVerificationFailed")
+                    : t("alertSetupStopped")}
+                </AlertTitle>
                 <AlertDescription>{formError}</AlertDescription>
               </Alert>
             )}

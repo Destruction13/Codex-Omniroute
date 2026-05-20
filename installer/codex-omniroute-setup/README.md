@@ -2,8 +2,8 @@
 
 This project builds the Windows Electron installer for Codex OmniRoute. The
 installer asks for an install folder, an OmniRoute-compatible base URL, and an
-API Manager key, then runs the dependency and verification pipeline from the
-root project.
+access key, then runs the dependency and verification pipeline from the root
+project.
 
 ## Development
 

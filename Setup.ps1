@@ -221,10 +221,10 @@ function Ensure-ProviderConfig {
             Write-Warn "Existing provider config will be overwritten: $providerPath"
         }
         if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) {
-            $ProviderBaseUrl = Read-RequiredValue -Prompt 'OmniRoute base URL' -Example 'https://your-omniroute.example/v1'
+            $ProviderBaseUrl = Read-RequiredValue -Prompt 'Service URL' -Example 'https://service.example/v1'
         }
         if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) {
-            $ProviderApiKey = Read-SecretValue -Prompt 'OmniRoute API key'
+            $ProviderApiKey = Read-SecretValue -Prompt 'Access key'
         }
     }
 
@@ -361,7 +361,7 @@ try {
     Write-Step 2 'Installing local dependencies'
     [void](Install-Dependencies -Root $root)
 
-    Write-Step 3 'Configuring OmniRoute provider'
+    Write-Step 3 'Configuring provider'
     [void](Ensure-ProviderConfig -Root $root)
 
     Write-Step 4 'Preparing Windows app gateway'

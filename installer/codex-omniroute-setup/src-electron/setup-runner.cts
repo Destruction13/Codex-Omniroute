@@ -11,6 +11,8 @@ import type {
   LaunchResult,
   PowerShellHost,
   ProcessResult,
+  ProviderVerificationRequest,
+  ProviderVerificationResult,
   SetupEvent,
   SetupSnapshot,
   SetupStepSnapshot,
@@ -31,17 +33,21 @@ const DEFAULT_PROVIDER_MODEL_ALIASES: Record<string, string> = {
 const PROVIDER_HEADERS: Record<string, string> = {
   "x-codex-omniroute-client": "codex-omniroute-bridge",
 }
+const KEY_VERIFICATION_FAILED =
+  "Key verification failed. Check the access key and try again."
+const SERVICE_VERIFICATION_FAILED =
+  "Service verification failed. Check the service URL and try again."
 
 const STEP_DEFINITIONS = [
+  ["api", "Access key verification"],
   ["preflight", "Windows preflight"],
   ["powershell", "PowerShell host"],
-  ["api", "OmniRoute API Manager key"],
   ["winget", "App Installer / winget"],
   ["codex", "Official Codex Store app"],
   ["recommended", "Windows developer tools"],
   ["source", "Codex OmniRoute source"],
   ["local-deps", "Local Node.js and .NET"],
-  ["provider", "OmniRoute provider config"],
+  ["provider", "Provider config"],
   ["gateway", "Gateway, wrapper, shortcuts"],
   ["verify", "Architecture verifier"],
   ["launch", "Launch Codex OmniRoute"],
@@ -75,6 +81,18 @@ export function createInitialSnapshot(): SetupSnapshot {
 
 export function getDefaultInstallDir(): string {
   return path.join(os.homedir(), "CodexOmniRoute")
+}
+
+export async function verifyProviderCredentials(
+  request: ProviderVerificationRequest
+): Promise<ProviderVerificationResult> {
+  const normalized = normalizeProviderRequest(request)
+  const probe = await probeOmniRouteProvider(createProviderConfig(normalized))
+  return {
+    endpoint: probe.endpoint,
+    matchedModel: probe.matchedModel,
+    modelCount: probe.modelCount,
+  }
 }
 
 interface OmniRouteProcess {
@@ -121,7 +139,7 @@ export async function launchInstalledOmniRoute(
     throw new Error(`Codex OmniRoute launcher was not found: ${script}`)
   }
   if (!(await exists(providerPath))) {
-    throw new Error(`OmniRoute provider config was not found: ${providerPath}`)
+    throw new Error(`Provider config was not found: ${providerPath}`)
   }
 
   const powerShell = await findPowerShellHost()
@@ -230,6 +248,8 @@ export class SetupRunner {
 
     try {
       const normalized = this.validateRequest(request)
+      await this.verifyProviderAccess(normalized)
+
       const powerShell = await this.runStep(
         "preflight",
         "Checking OS and install path",
@@ -242,8 +262,6 @@ export class SetupRunner {
           return "Install parent is writable."
         }
       ).then(() => this.ensurePowerShell())
-
-      await this.verifyProviderAccess(normalized)
 
       const codexBefore = await this.getCodexPackage(powerShell)
       const winget = await this.ensureWinget(
@@ -287,26 +305,12 @@ export class SetupRunner {
   }
 
   private validateRequest(request: InstallRequest): InstallRequest {
-    const installDir = path.resolve(
-      request.installDir || getDefaultInstallDir()
-    )
-    if (!request.baseUrl.trim()) {
-      throw new Error("Base URL is required.")
-    }
-    const parsedUrl = new URL(request.baseUrl.trim())
-    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
-      throw new Error("Base URL must start with http:// or https://.")
-    }
-    parsedUrl.hash = ""
-    parsedUrl.search = ""
-    if (!request.apiKey.trim()) {
-      throw new Error("API key is required.")
-    }
+    const provider = normalizeProviderRequest(request)
+    const installDir = path.resolve(request.installDir || getDefaultInstallDir())
     return {
       ...request,
+      ...provider,
       installDir,
-      baseUrl: stripTrailingSlash(parsedUrl.toString()),
-      apiKey: request.apiKey.trim(),
       repoBranch: request.repoBranch?.trim(),
     }
   }
@@ -314,12 +318,12 @@ export class SetupRunner {
   private async verifyProviderAccess(request: InstallRequest): Promise<void> {
     await this.runStep(
       "api",
-      "Checking OmniRoute API Manager key",
+      "Checking access key",
       async () => {
         const probe = await probeOmniRouteProvider(
           createProviderConfig(request)
         )
-        return `API Manager accepted the key (${probe.apiManagerDetail}); ${probe.matchedModel} is present in OmniRoute models (${probe.modelCount} listed via ${probe.endpoint}).`
+        return `Access key verified; ${probe.matchedModel} is available (${probe.modelCount} models listed).`
       }
     )
   }
@@ -788,7 +792,7 @@ Repair-WinGetPackageManager
           this.setStep(
             "verify",
             "warning",
-            "Architecture verifier reported non-blocking failures; OmniRoute API access was already validated."
+            "Architecture verifier reported non-blocking failures; service access was already validated."
           )
           return
         }
@@ -1507,7 +1511,28 @@ function isSafeGeneratedTarget(parent: string, target: string): boolean {
   )
 }
 
-function createProviderConfig(request: InstallRequest): ProviderConfig {
+function normalizeProviderRequest(
+  request: ProviderVerificationRequest
+): ProviderVerificationRequest {
+  if (!request.baseUrl.trim()) {
+    throw new Error("Service URL is required.")
+  }
+  const parsedUrl = new URL(request.baseUrl.trim())
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    throw new Error("Service URL must start with http:// or https://.")
+  }
+  parsedUrl.hash = ""
+  parsedUrl.search = ""
+  if (!request.apiKey.trim()) {
+    throw new Error("Access key is required.")
+  }
+  return {
+    baseUrl: stripTrailingSlash(parsedUrl.toString()),
+    apiKey: request.apiKey.trim(),
+  }
+}
+
+function createProviderConfig(request: ProviderVerificationRequest): ProviderConfig {
   return {
     _comment: "Generated by Codex OmniRoute Setup.exe. Never commit this file.",
     base_url: request.baseUrl,
@@ -1522,30 +1547,47 @@ function createProviderConfig(request: InstallRequest): ProviderConfig {
 async function probeOmniRouteProvider(
   provider: ProviderConfig
 ): Promise<ProviderProbeResult> {
+  validateKeyBelongsToService(provider)
   const apiManager = await probeApiManagerKey(provider)
   const modelProbe = await probeOmniRouteModels(provider)
   return {
     ...modelProbe,
-    apiManagerEndpoint: apiManager.endpoint,
-    apiManagerDetail: apiManager.detail,
+    apiManagerEndpoint: apiManager?.endpoint ?? "",
+    apiManagerDetail:
+      apiManager?.detail ?? "verified by protected service endpoint",
+  }
+}
+
+function validateKeyBelongsToService(provider: ProviderConfig): void {
+  let url: URL
+  try {
+    url = new URL(provider.base_url)
+  } catch {
+    throw new Error(SERVICE_VERIFICATION_FAILED)
+  }
+  const tenant = url.hostname.match(/(?:^|\.)omniroute-([a-z0-9]{8})/i)?.[1]
+  if (!tenant) {
+    return
+  }
+  const normalizedKey = provider.api_key.trim().toLowerCase()
+  if (!normalizedKey.startsWith(`sk-${tenant.toLowerCase()}`)) {
+    throw new Error(KEY_VERIFICATION_FAILED)
   }
 }
 
 async function probeApiManagerKey(
   provider: ProviderConfig
-): Promise<ApiManagerProbeResult> {
+): Promise<ApiManagerProbeResult | null> {
   const endpoints = getApiManagerEndpoints(provider.base_url)
-  const failures: string[] = []
 
   for (const endpoint of endpoints) {
     let response: Response
     try {
       response = await fetchWithTimeout(endpoint, {
         method: "GET",
-        headers: buildProviderProbeHeaders(provider),
+        headers: buildManagementProbeHeaders(provider),
       })
-    } catch (error) {
-      failures.push(`${endpoint}: ${toErrorMessage(error)}`)
+    } catch {
       continue
     }
 
@@ -1557,9 +1599,7 @@ async function probeApiManagerKey(
       try {
         parsed = body ? JSON.parse(body) : null
       } catch {
-        throw new Error(
-          `OmniRoute API Manager returned non-JSON content at ${endpoint}.`
-        )
+        continue
       }
 
       const keys = extractApiManagerKeys(parsed)
@@ -1567,19 +1607,25 @@ async function probeApiManagerKey(
         apiManagerKeyMatches(provider.api_key, key)
       )
       if (!matched) {
-        const count = readNumberField(parsed, "total") ?? keys.length
-        throw new Error(
-          `OmniRoute API Manager is reachable, but this API key is not in its key list (${count} listed). Create or copy a key from Dashboard > API Manager.`
-        )
+        throw new Error(KEY_VERIFICATION_FAILED)
       }
 
       return {
         endpoint,
-        detail: `listed in API Manager as ${describeApiManagerKey(matched)}`,
+        detail: `listed as ${describeApiManagerKey(matched)}`,
       }
     }
 
     const lowerMessage = message.toLowerCase()
+    if (
+      response.status === 403 &&
+      lowerMessage.includes("invalid") &&
+      lowerMessage.includes("management") &&
+      lowerMessage.includes("token")
+    ) {
+      continue
+    }
+
     if (
       response.status === 403 &&
       lowerMessage.includes("lacks") &&
@@ -1588,22 +1634,12 @@ async function probeApiManagerKey(
     ) {
       return {
         endpoint,
-        detail: "validated by API Manager auth; key has no management scope",
+        detail: "validated by service auth; key has no management scope",
       }
     }
-
-    if (response.status === 401 || response.status === 403) {
-      throw new Error(
-        `OmniRoute API Manager rejected this key at ${endpoint} (HTTP ${response.status}${message ? `: ${message}` : ""}). Create or copy a real API Manager key.`
-      )
-    }
-
-    failures.push(
-      `${endpoint}: HTTP ${response.status}${formatBodySnippet(body)}`
-    )
   }
 
-  throw new Error(`OmniRoute API Manager check failed. ${failures.join(" | ")}`)
+  return null
 }
 
 async function probeOmniRouteModels(
@@ -1616,22 +1652,30 @@ async function probeOmniRouteModels(
   const failures: string[] = []
 
   for (const endpoint of endpoints) {
-    let response: Response
-    try {
-      response = await fetchWithTimeout(endpoint, {
-        method: "GET",
-        headers: buildProviderProbeHeaders(provider),
-      })
-    } catch (error) {
-      failures.push(`${endpoint}: ${toErrorMessage(error)}`)
+    let response: Response | null = null
+    for (const headers of getProviderProbeHeaderVariants(provider)) {
+      try {
+        response = await fetchWithTimeout(endpoint, {
+          method: "GET",
+          headers,
+        })
+      } catch (error) {
+        failures.push(`${endpoint}: ${toErrorMessage(error)}`)
+        continue
+      }
+
+      if (response.status !== 401 && response.status !== 403) {
+        break
+      }
+    }
+
+    if (!response) {
       continue
     }
 
     const body = await response.text()
     if (response.status === 401 || response.status === 403) {
-      throw new Error(
-        `OmniRoute rejected the API key at ${endpoint} (HTTP ${response.status}).`
-      )
+      throw new Error(KEY_VERIFICATION_FAILED)
     }
     if (!response.ok) {
       failures.push(
@@ -1644,9 +1688,7 @@ async function probeOmniRouteModels(
     try {
       parsed = body ? JSON.parse(body) : null
     } catch {
-      throw new Error(
-        `OmniRoute models endpoint returned non-JSON content at ${endpoint}.`
-      )
+      throw new Error(SERVICE_VERIFICATION_FAILED)
     }
 
     const models = extractModelIds(parsed)
@@ -1655,9 +1697,8 @@ async function probeOmniRouteModels(
       modelSet.has(model.toLowerCase())
     )
     if (!matchedModel) {
-      const sample = models.slice(0, 12).join(", ") || "none"
       throw new Error(
-        `OmniRoute API key is accepted, but required model is missing. Expected one of: ${requiredModels.join(", ")}. Models sample: ${sample}.`
+        "The access key is valid, but the required model is unavailable for this account."
       )
     }
 
@@ -1668,7 +1709,9 @@ async function probeOmniRouteModels(
     }
   }
 
-  throw new Error(`OmniRoute endpoint check failed. ${failures.join(" | ")}`)
+  throw new Error(
+    failures.length > 0 ? SERVICE_VERIFICATION_FAILED : KEY_VERIFICATION_FAILED
+  )
 }
 
 function getApiManagerEndpoints(baseUrl: string): string[] {
@@ -1712,7 +1755,7 @@ function appendUrlPath(baseUrl: string, child: string): string {
   return `${stripTrailingSlash(baseUrl)}/${child.replace(/^\/+/, "")}`
 }
 
-function buildProviderProbeHeaders(
+function buildManagementProbeHeaders(
   provider: ProviderConfig
 ): Record<string, string> {
   return {
@@ -1720,6 +1763,25 @@ function buildProviderProbeHeaders(
     authorization: `Bearer ${provider.api_key}`,
     ...provider.headers,
   }
+}
+
+function getProviderProbeHeaderVariants(
+  provider: ProviderConfig
+): Array<Record<string, string>> {
+  const baseHeaders = {
+    accept: "application/json",
+    ...provider.headers,
+  }
+  return [
+    {
+      ...baseHeaders,
+      authorization: `Bearer ${provider.api_key}`,
+    },
+    {
+      ...baseHeaders,
+      "x-api-key": provider.api_key,
+    },
+  ]
 }
 
 function extractResponseMessage(body: string): string {
@@ -1816,14 +1878,6 @@ function describeApiManagerKey(row: Record<string, unknown>): string {
           ? row.masked_key.trim()
       : "masked key"
   return `${name} (${masked})`
-}
-
-function readNumberField(payload: unknown, field: string): number | null {
-  if (!payload || typeof payload !== "object") {
-    return null
-  }
-  const value = (payload as Record<string, unknown>)[field]
-  return typeof value === "number" && Number.isFinite(value) ? value : null
 }
 
 function getProviderModelCandidates(provider: ProviderConfig): string[] {

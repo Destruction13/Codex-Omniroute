@@ -120,10 +120,9 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 <tr>
 <td align="center"><b>4</b></td>
 <td>
-<b>Введи OmniRoute credentials.</b><br />
-Когда setup спросит, вставь OmniRoute base URL и API key. Setup проверит,
-что ключ реально существует в OmniRoute **API Manager**, а endpoint отдаёт
-нужную модель, до скачивания и установки.
+<b>Введи данные доступа.</b><br />
+Когда setup спросит, вставь адрес сервиса и ключ доступа. Setup проверит
+ключ до перехода к установке и остановит процесс, если верификация не пройдёт.
 </td>
 </tr>
 <tr>
@@ -148,9 +147,9 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 | Шаг | Результат |
 | --- | --- |
 | Проверяет официальный Codex | Убеждается, что официальный Desktop app установлен и готов. |
-| Проверяет OmniRoute API Manager | Останавливает setup, если ключ не найден в API Manager или endpoint не проходит `/models`. |
+| Проверяет ключ доступа | Останавливает setup до установки, если ключ или endpoint не проходят верификацию. |
 | Ставит зависимости | Сам ставит локальные Node.js и .NET SDK, если их нет. |
-| Спрашивает OmniRoute доступ | Сохраняет base URL и API key в локальный config. |
+| Спрашивает доступ к сервису | Сохраняет service URL и access key в локальный config. |
 | Готовит отдельное окно | Создаёт рабочий запуск **Codex OmniRoute** рядом с официальным Codex. |
 | Создаёт ярлыки | Добавляет **Codex OmniRoute** и **Codex Official** на рабочий стол и в Start Menu. |
 | Проверяет запуск | Запускает verifier и показывает, что bridge, MCP и tools видны. |
@@ -192,7 +191,7 @@ Copy-Item .\omniroute-provider.example.json .\omniroute-provider.json
 
 ```json
 {
-  "base_url": "https://your-omniroute.example/v1",
+  "base_url": "https://service.example/v1",
   "api_key": "YOUR_OMNIROUTE_KEY",
   "model_prefix": "cx/",
   "default_model": "gpt-5.5",
@@ -220,7 +219,7 @@ Copy-Item .\omniroute-provider.example.json .\omniroute-provider.json
 | Симптом | Что сделать |
 | --- | --- |
 | Setup пишет, что official Codex missing | Установи OpenAI Codex из Microsoft Store, открой один раз, войди в аккаунт, затем снова запусти `Setup.exe`. |
-| Setup просит base URL или API key | Введи значения OmniRoute или заранее создай `omniroute-provider.json`. |
+| Setup просит service URL или access key | Введи выданные данные доступа или заранее создай `omniroute-provider.json`. |
 | Один MCP показывает `auth_required` | MCP есть в shared config, но ему нужен свой token или OAuth grant. Настрой его в official Codex home. |
 | OmniRoute window открывается, но bridge hits не растут | Открой `http://127.0.0.1:20333/healthz`, проверь `main_reasoning_hits`, затем запусти verifier. |
 | Что-то выглядит stale | Запусти `.\Start-Codex-OmniRoute.ps1 -Restore`, затем снова `.\Setup.exe`. |
