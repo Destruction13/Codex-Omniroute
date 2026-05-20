@@ -9,12 +9,15 @@ only by launcher arguments for that process.
 For normal Windows installs, run the one-click bootstrapper:
 
 ```powershell
-.\Setup.exe
+.\Setup.bat
 ```
 
-The bootstrapper installs local dependencies, prepares the duplicated Windows
-app, creates shortcuts, and runs the verifier. Use the manual steps below only
-when debugging setup itself.
+In a source checkout or ZIP download, `Setup.bat` runs the current Electron
+installer directly from source and doesn't package `Setup.exe`. In a release
+bundle without installer sources, the same bootstrapper runs the packaged
+`Setup.exe`. The bootstrapper installs local dependencies, prepares the
+duplicated Windows app, creates shortcuts, and runs the verifier. Use the
+manual steps below only when debugging setup itself.
 
 ## Manual install
 
@@ -148,7 +151,7 @@ node .\tools\mcp_probe.mjs `
 | `/healthz` shows `main_reasoning_hits: 0` after a GUI message | The desktop process did not receive the runtime overrides, or an existing official window was reused. | Run `.\Start-Codex-OmniRoute.ps1 -Restore`, then relaunch without `-NoAppDuplicate`. |
 | The wrapper build fails | Local .NET SDK dependencies are missing or incomplete. | Run `.\tools\Install-CodexOmniRouteDependencies.ps1`, then relaunch OmniRoute. |
 | MCP tools are missing | The shared official config or connector cache is stale. | Launch official Codex once, confirm tools there, then relaunch OmniRoute. |
-| Image requests fail with auth errors | The OmniRoute endpoint rejected the provider key for the image lane. | Confirm `api_key` is valid in OmniRoute API Manager, then retry. |
+| Image requests fail with auth errors | The service rejected the provider key for the image lane. | Confirm `api_key` is valid, then retry. |
 | Requests with image history fail near 10MB | Inline image history is still too large after compaction. | Lower `CODEX_OMNI_INLINE_IMAGE_HISTORY_BUDGET_BYTES` or clear old image-heavy context. |
 | `apply_patch` fails | Native freeform path is unavailable in the current build. | Use `tools\Invoke-CodexApplyPatch.ps1` as a local fallback and record the limitation. |
 

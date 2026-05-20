@@ -10,8 +10,14 @@ import {
   launchInstalledOmniRoute,
   parseHeadlessRequest,
   SetupRunner,
+  verifyProviderCredentials,
 } from "./setup-runner.cjs";
-import type { InstallRequest, SetupEvent, SetupSnapshot } from "./types.cjs";
+import type {
+  InstallRequest,
+  ProviderVerificationRequest,
+  SetupEvent,
+  SetupSnapshot,
+} from "./types.cjs";
 
 let mainWindow: BrowserWindowType | null = null;
 let currentSnapshot: SetupSnapshot = createInitialSnapshot();
@@ -101,6 +107,12 @@ ipcMain.handle("setup:select-install-dir", async (_event, current?: string) => {
   }
   return result.filePaths[0] ?? null;
 });
+
+ipcMain.handle(
+  "setup:verify-provider",
+  async (_event, request: ProviderVerificationRequest) =>
+    verifyProviderCredentials(request)
+);
 
 ipcMain.handle("setup:start", async (_event, request: InstallRequest) => {
   if (currentRunner) {

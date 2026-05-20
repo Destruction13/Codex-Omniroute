@@ -1,13 +1,24 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type { IpcRendererEvent } from "electron";
 
-import type { InstallRequest, LaunchResult, SetupEvent, SetupSnapshot } from "./types.cjs";
+import type {
+  InstallRequest,
+  LaunchResult,
+  ProviderVerificationRequest,
+  ProviderVerificationResult,
+  SetupEvent,
+  SetupSnapshot,
+} from "./types.cjs";
 
 const api = {
   getDefaults: (): Promise<{ installDir: string; snapshot: SetupSnapshot }> =>
     ipcRenderer.invoke("setup:get-defaults"),
   selectInstallDir: (current?: string): Promise<string | null> =>
     ipcRenderer.invoke("setup:select-install-dir", current),
+  verifyProvider: (
+    request: ProviderVerificationRequest
+  ): Promise<ProviderVerificationResult> =>
+    ipcRenderer.invoke("setup:verify-provider", request),
   startInstall: (request: InstallRequest): Promise<void> =>
     ipcRenderer.invoke("setup:start", request),
   launchInstalled: (): Promise<LaunchResult> => ipcRenderer.invoke("setup:launch-installed"),

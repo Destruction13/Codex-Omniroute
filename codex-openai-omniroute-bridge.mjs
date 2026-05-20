@@ -1302,10 +1302,11 @@ function buildForwardHeaders(inboundHeaders, mode, provider, officialAuth) {
 
   if (mode === "omniroute") {
     delete out["authorization"];
+    delete out["x-api-key"];
     delete out["openai-organization"];
     delete out["openai-project"];
     delete out["chatgpt-account-id"];
-    if (provider.api_key) out["authorization"] = `Bearer ${provider.api_key}`;
+    if (provider.api_key) out["x-api-key"] = provider.api_key;
     for (const [k, v] of Object.entries(provider.headers || {})) out[k] = String(v);
     out["x-omniroute-client"] = out["x-omniroute-client"] || "codex-omniroute-bridge";
   } else if (mode === "official") {

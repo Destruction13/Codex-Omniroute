@@ -2,8 +2,8 @@
 
 This project builds the Windows Electron installer for Codex OmniRoute. The
 installer asks for an install folder, an OmniRoute-compatible base URL, and an
-API Manager key, then runs the dependency and verification pipeline from the
-root project.
+access key, then runs the dependency and verification pipeline from the root
+project.
 
 ## Development
 
@@ -18,6 +18,18 @@ npm run build
 
 The UI is a Vite React app that uses shadcn/ui components. The Electron main
 process lives in `src-electron`, and the rendered UI lives in `src`.
+
+## Run from source
+
+From the repository root, use this command to run the installer without
+packaging a new `Setup.exe`.
+
+```powershell
+.\Setup.bat
+```
+
+The source runner installs missing npm dependencies, builds the installer UI,
+and opens Electron from `installer/codex-omniroute-setup`.
 
 ## Packaging
 

@@ -28,6 +28,17 @@ interface InstallRequest {
   skipShortcuts?: boolean;
 }
 
+interface ProviderVerificationRequest {
+  baseUrl: string;
+  apiKey: string;
+}
+
+interface ProviderVerificationResult {
+  endpoint: string;
+  matchedModel: string;
+  modelCount: number;
+}
+
 interface SetupSnapshot {
   status: "idle" | "running" | "success" | "error";
   installRoot?: string;
@@ -52,6 +63,9 @@ type SetupEvent =
 interface OmniSetupApi {
   getDefaults: () => Promise<{ installDir: string; snapshot: SetupSnapshot }>;
   selectInstallDir: (current?: string) => Promise<string | null>;
+  verifyProvider: (
+    request: ProviderVerificationRequest
+  ) => Promise<ProviderVerificationResult>;
   startInstall: (request: InstallRequest) => Promise<void>;
   launchInstalled: () => Promise<LaunchResult>;
   openLog: () => Promise<void>;
