@@ -291,6 +291,17 @@ function Get-UniqueExistingDirectories {
     return $result.ToArray()
 }
 
+function Get-StartMenuProgramsDirectory {
+    $candidates = @(
+        [Environment]::GetFolderPath('Programs'),
+        $(if ($env:APPDATA) { Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs' } else { '' }),
+        $(if ($env:USERPROFILE) { Join-Path $env:USERPROFILE 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs' } else { '' })
+    )
+    $dirs = @(Get-UniqueExistingDirectories -Paths $candidates)
+    if ($dirs.Length -gt 0) { return $dirs[0] }
+    throw 'Could not resolve a Start Menu programs directory.'
+}
+
 function Install-Shortcuts {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
@@ -300,8 +311,7 @@ function Install-Shortcuts {
     $omniBat = Join-Path $Root 'Start-Codex-OmniRoute.bat'
     $officialBat = Join-Path $Root 'Start-Codex-Official.bat'
     $icon = Join-Path $CodexPackage.InstallLocation 'app\Codex.exe'
-    $programs = Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs'
-    $folder = Join-Path $programs 'Codex OmniRoute'
+    $folder = Join-Path (Get-StartMenuProgramsDirectory) 'Codex OmniRoute'
     $desktopCandidates = Get-UniqueExistingDirectories @(
         [Environment]::GetFolderPath('DesktopDirectory'),
         [Environment]::GetFolderPath('Desktop'),
