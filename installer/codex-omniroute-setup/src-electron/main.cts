@@ -124,7 +124,7 @@ ipcMain.handle("setup:launch-installed", async () => {
   if (!currentSnapshot.repoRoot) {
     throw new Error("Codex OmniRoute is not installed yet.");
   }
-  await launchInstalledOmniRoute(currentSnapshot.repoRoot);
+  return launchInstalledOmniRoute(currentSnapshot.repoRoot);
 });
 
 const runHeadless = async (request: InstallRequest): Promise<void> => {

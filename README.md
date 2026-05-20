@@ -121,8 +121,9 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 <td align="center"><b>4</b></td>
 <td>
 <b>Введи OmniRoute credentials.</b><br />
-Когда setup спросит, вставь OmniRoute base URL и API key. Если image gateway
-использует отдельный ключ, введи и его.
+Когда setup спросит, вставь OmniRoute base URL и API key. Setup проверит,
+что ключ реально существует в OmniRoute **API Manager**, а endpoint отдаёт
+нужную модель, до скачивания и установки.
 </td>
 </tr>
 <tr>
@@ -147,6 +148,7 @@ git clone https://github.com/Destruction13/Codex-Omniroute.git
 | Шаг | Результат |
 | --- | --- |
 | Проверяет официальный Codex | Убеждается, что официальный Desktop app установлен и готов. |
+| Проверяет OmniRoute API Manager | Останавливает setup, если ключ не найден в API Manager или endpoint не проходит `/models`. |
 | Ставит зависимости | Сам ставит локальные Node.js и .NET SDK, если их нет. |
 | Спрашивает OmniRoute доступ | Сохраняет base URL и API key в локальный config. |
 | Готовит отдельное окно | Создаёт рабочий запуск **Codex OmniRoute** рядом с официальным Codex. |
@@ -194,8 +196,6 @@ Copy-Item .\omniroute-provider.example.json .\omniroute-provider.json
   "api_key": "YOUR_OMNIROUTE_KEY",
   "model_prefix": "cx/",
   "default_model": "gpt-5.5",
-  "image_api_key": "",
-  "image_model": "chatgpt-web/gpt-5.3-instant",
   "model_aliases": {
     "gpt-5.5": "gpt-5.5-xhigh"
   }

@@ -2023,7 +2023,7 @@ async function handleOmniRouteImage(req, res, suffix) {
     res.end(
       JSON.stringify({
         error: "omniroute_image_not_configured",
-        detail: "Set CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY, OMNIROUTE_IMAGE_API_KEY, or provider api_key.",
+        detail: "Set the OmniRoute provider api_key.",
       }),
     );
     return;

@@ -24,8 +24,7 @@ param(
     [switch]$SkipVerify,
     [switch]$SkipShortcuts,
     [string]$ProviderBaseUrl = '',
-    [string]$ProviderApiKey = '',
-    [string]$ProviderImageApiKey = ''
+    [string]$ProviderApiKey = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -178,8 +177,7 @@ function Save-ProviderJson {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [Parameter(Mandatory = $true)][string]$ApiKey,
-        [string]$ImageApiKey = ''
+        [Parameter(Mandatory = $true)][string]$ApiKey
     )
 
     $provider = [ordered]@{
@@ -191,8 +189,6 @@ function Save-ProviderJson {
         'model_aliases' = [ordered]@{
             'gpt-5.5' = 'gpt-5.5-xhigh'
         }
-        'image_api_key' = $ImageApiKey
-        'image_model' = 'chatgpt-web/gpt-5.3-instant'
         'headers' = @{
             'x-codex-omniroute-client' = 'codex-omniroute-bridge'
         }
@@ -209,7 +205,6 @@ function Ensure-ProviderConfig {
     $providerPath = Join-Path $Root 'omniroute-provider.json'
     if ([string]::IsNullOrWhiteSpace($ProviderBaseUrl)) { $ProviderBaseUrl = $env:CODEX_OMNI_OMNIROUTE_BASE_URL }
     if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) { $ProviderApiKey = $env:CODEX_OMNI_OMNIROUTE_API_KEY }
-    if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) { $ProviderImageApiKey = $env:CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY }
 
     if ($NonInteractive) {
         if ((Test-Path -LiteralPath $providerPath) -and
@@ -231,13 +226,9 @@ function Ensure-ProviderConfig {
         if ([string]::IsNullOrWhiteSpace($ProviderApiKey)) {
             $ProviderApiKey = Read-SecretValue -Prompt 'OmniRoute API key'
         }
-        if ([string]::IsNullOrWhiteSpace($ProviderImageApiKey)) {
-            $ProviderImageApiKey = Read-Host 'Optional image API key [Enter to reuse main key]'
-            if ($null -ne $ProviderImageApiKey) { $ProviderImageApiKey = $ProviderImageApiKey.Trim() }
-        }
     }
 
-    Save-ProviderJson -Path $providerPath -BaseUrl $ProviderBaseUrl -ApiKey $ProviderApiKey -ImageApiKey $ProviderImageApiKey
+    Save-ProviderJson -Path $providerPath -BaseUrl $ProviderBaseUrl -ApiKey $ProviderApiKey
     Write-OK "Wrote provider config: $providerPath"
     return $providerPath
 }

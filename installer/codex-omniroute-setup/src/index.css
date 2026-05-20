@@ -166,6 +166,7 @@
 }
 
 .brand-lockup,
+.chrome-actions,
 .roadmap-header,
 .folder-row,
 .action-row,
@@ -178,6 +179,16 @@
 
 .brand-lockup {
   gap: 14px;
+}
+
+.chrome-actions {
+  gap: 10px;
+}
+
+.language-trigger {
+  min-width: 132px;
+  border-color: var(--steel-line);
+  background: oklch(0.13 0.016 220 / 42%);
 }
 
 .brand-mark {
@@ -577,7 +588,8 @@ h1 {
   display: grid;
   grid-template-columns: 142px minmax(0, 1fr);
   gap: 10px;
-  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-family:
+    ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 0.72rem;
 }
 

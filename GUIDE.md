@@ -25,8 +25,9 @@ when debugging setup itself.
    compatible Node runtime is not already available.
 3. Copy `omniroute-provider.example.json` to `omniroute-provider.json`.
 4. Set `base_url` and `api_key` for your OmniRoute endpoint.
-5. Optional: set `CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY` if your image gateway
-   uses a separate key.
+
+Image requests reuse the main `api_key`; the installer doesn't collect a
+separate image-generation credential.
 
 The launcher uses `%USERPROFILE%\.codex` as `CODEX_HOME`. It does not copy
 `auth.json`, `models_cache.json`, MCP config, plugin cache, or sessions into an
@@ -147,7 +148,7 @@ node .\tools\mcp_probe.mjs `
 | `/healthz` shows `main_reasoning_hits: 0` after a GUI message | The desktop process did not receive the runtime overrides, or an existing official window was reused. | Run `.\Start-Codex-OmniRoute.ps1 -Restore`, then relaunch without `-NoAppDuplicate`. |
 | The wrapper build fails | Local .NET SDK dependencies are missing or incomplete. | Run `.\tools\Install-CodexOmniRouteDependencies.ps1`, then relaunch OmniRoute. |
 | MCP tools are missing | The shared official config or connector cache is stale. | Launch official Codex once, confirm tools there, then relaunch OmniRoute. |
-| Image requests fail with auth errors | The image gateway requires a separate key. | Set `CODEX_OMNI_OMNIROUTE_IMAGE_API_KEY`. |
+| Image requests fail with auth errors | The OmniRoute endpoint rejected the provider key for the image lane. | Confirm `api_key` is valid in OmniRoute API Manager, then retry. |
 | Requests with image history fail near 10MB | Inline image history is still too large after compaction. | Lower `CODEX_OMNI_INLINE_IMAGE_HISTORY_BUDGET_BYTES` or clear old image-heavy context. |
 | `apply_patch` fails | Native freeform path is unavailable in the current build. | Use `tools\Invoke-CodexApplyPatch.ps1` as a local fallback and record the limitation. |
 

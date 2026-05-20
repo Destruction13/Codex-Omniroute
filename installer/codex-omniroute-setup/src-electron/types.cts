@@ -20,7 +20,6 @@ export interface InstallRequest {
   installDir: string;
   baseUrl: string;
   apiKey: string;
-  imageApiKey?: string;
   installRecommendedTools: boolean;
   launchAfterInstall: boolean;
   repoBranch?: string;
