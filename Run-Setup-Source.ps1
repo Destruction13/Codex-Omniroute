@@ -31,6 +31,83 @@ function Write-Setup {
     Write-Host "[setup] $Message"
 }
 
+function ConvertTo-ProcessArgumentString {
+    param([string[]]$Arguments)
+
+    $quoted = foreach ($arg in $Arguments) {
+        if ($arg -notmatch '[\s"]') {
+            $arg
+        } else {
+            '"' + ($arg -replace '([\\]*)"', '$1$1\"' -replace '([\\]+)$', '$1$1') + '"'
+        }
+    }
+    return ($quoted -join ' ')
+}
+
+function Invoke-SetupProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][string[]]$Arguments,
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [int]$HeartbeatSeconds = 20
+    )
+
+    Write-Setup $Activity
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $FilePath
+    $psi.WorkingDirectory = (Get-Location).Path
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $argumentListProperty = [System.Diagnostics.ProcessStartInfo].GetProperty('ArgumentList')
+    if ($null -ne $argumentListProperty) {
+        foreach ($arg in $Arguments) { [void]$psi.ArgumentList.Add($arg) }
+    } else {
+        $psi.Arguments = ConvertTo-ProcessArgumentString -Arguments $Arguments
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $psi
+    $process.EnableRaisingEvents = $true
+
+    $stdoutEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+        if ($EventArgs.Data) { [Console]::Out.WriteLine($EventArgs.Data) }
+    }
+    $stderrEvent = Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action {
+        if ($EventArgs.Data) { [Console]::Error.WriteLine($EventArgs.Data) }
+    }
+
+    $started = [DateTime]::UtcNow
+    $nextHeartbeat = $started.AddSeconds($HeartbeatSeconds)
+    try {
+        [void]$process.Start()
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        while (-not $process.WaitForExit(1000)) {
+            $now = [DateTime]::UtcNow
+            if ($now -ge $nextHeartbeat) {
+                $elapsed = [Math]::Round(($now - $started).TotalMinutes, 1)
+                Write-Setup "$Activity still running... elapsed ${elapsed}m"
+                $nextHeartbeat = $now.AddSeconds($HeartbeatSeconds)
+            }
+        }
+        $process.WaitForExit()
+
+        if ($process.ExitCode -ne 0) {
+            throw "$Activity failed with exit code $($process.ExitCode)."
+        }
+    } finally {
+        Unregister-Event -SourceIdentifier $stdoutEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $stderrEvent.Name -ErrorAction SilentlyContinue
+        Remove-Job -Id $stdoutEvent.Id,$stderrEvent.Id -Force -ErrorAction SilentlyContinue
+        $process.Dispose()
+    }
+}
+
 function Test-NodeRuntime {
     param([AllowNull()][string]$NodeExe)
     if ([string]::IsNullOrWhiteSpace($NodeExe)) { return $false }
@@ -95,6 +172,7 @@ $nodeExe = Resolve-NodeRuntime
 $nodeDir = Split-Path -Parent $nodeExe
 $npmCmd = Join-Path $nodeDir 'npm.cmd'
 $npxCmd = Join-Path $nodeDir 'npx.cmd'
+$npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
 
 if (-not (Test-Path -LiteralPath $npmCmd)) {
     $npmCmd = Get-CommandPath -Name 'npm.cmd'
@@ -102,21 +180,26 @@ if (-not (Test-Path -LiteralPath $npmCmd)) {
 if (-not (Test-Path -LiteralPath $npmCmd)) {
     throw 'npm.cmd was not found after resolving Node.js.'
 }
+if (-not (Test-Path -LiteralPath $npmCli)) {
+    throw "npm CLI was not found after resolving Node.js: $npmCli"
+}
 
 $env:PATH = "$nodeDir;$env:PATH"
 Push-Location $AppDir
 try {
     if (-not (Test-Path -LiteralPath '.\node_modules\.package-lock.json')) {
-        Write-Setup 'Installing Electron installer dependencies with npm ci...'
-        & $npmCmd ci
-        if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE." }
+        Invoke-SetupProcess `
+            -FilePath $nodeExe `
+            -Arguments @($npmCli, 'ci', '--foreground-scripts', '--loglevel=notice', '--progress=true') `
+            -Activity 'Installing Electron installer dependencies with npm ci'
     } else {
         Write-Setup 'Dependencies are already installed.'
     }
 
-    Write-Setup 'Building Electron installer UI...'
-    & $npmCmd run build
-    if ($LASTEXITCODE -ne 0) { throw "npm run build failed with exit code $LASTEXITCODE." }
+    Invoke-SetupProcess `
+        -FilePath $nodeExe `
+        -Arguments @($npmCli, 'run', 'build') `
+        -Activity 'Building Electron installer UI'
 
     if ($DryRun) {
         Write-Setup 'Dry run completed. The source installer is ready to launch.'
