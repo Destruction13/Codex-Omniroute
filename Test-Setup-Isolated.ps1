@@ -4,6 +4,7 @@ param(
     [switch]$Reset,
     [switch]$FreshMachine,
     [switch]$InPlace,
+    [switch]$UseHostStore,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$SetupArgs = @()
 )
@@ -59,12 +60,22 @@ $names = @(
     'USERPROFILE', 'HOME', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA',
     'TEMP', 'TMP', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'PATH',
     'CODEX_OMNI_DEPS_ROOT', 'CODEX_OMNI_FORCE_LOCAL_NODE',
-    'CODEX_OMNI_FORCE_LOCAL_DOTNET', 'CODEX_OMNI_SETUP_SIMULATE_NO_CODEX',
-    'CODEX_OMNI_SETUP_SIMULATE_NO_WINGET'
+    'CODEX_OMNI_FORCE_LOCAL_DOTNET', 'CODEX_OMNI_SETUP_SOURCE_DIR',
+    'CODEX_OMNI_SETUP_SIMULATE_NO_CODEX',
+    'CODEX_OMNI_SETUP_SIMULATE_NO_WINGET', 'CODEX_SETUP_NO_PAUSE'
 )
 foreach ($name in $names) {
     $oldEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
+
+$hostLocalAppData = $oldEnv['LOCALAPPDATA']
+$hostUserProfile = $oldEnv['USERPROFILE']
+if ([string]::IsNullOrWhiteSpace($hostLocalAppData) -and -not [string]::IsNullOrWhiteSpace($hostUserProfile)) {
+    $hostLocalAppData = Join-Path $hostUserProfile 'AppData\Local'
+}
+$hostProgramFiles = $oldEnv['ProgramFiles']
+$hostProgramFilesX86 = $oldEnv['ProgramFiles(x86)']
+$hostProgramW6432 = $oldEnv['ProgramW6432']
 
 try {
     $env:USERPROFILE = $UserProfile
@@ -81,15 +92,31 @@ try {
 
     $systemRoot = $env:SystemRoot
     if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = 'C:\Windows' }
-    $env:PATH = @(
+    $pathParts = @(
         (Join-Path $systemRoot 'System32'),
         $systemRoot,
         (Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0')
-    ) -join ';'
+    )
+
+    if ($UseHostStore) {
+        if (-not [string]::IsNullOrWhiteSpace($hostProgramFiles)) { $env:ProgramFiles = $hostProgramFiles }
+        if (-not [string]::IsNullOrWhiteSpace($hostProgramW6432)) { $env:ProgramW6432 = $hostProgramW6432 }
+        if (-not [string]::IsNullOrWhiteSpace($hostProgramFilesX86)) {
+            Set-Item -LiteralPath 'Env:ProgramFiles(x86)' -Value $hostProgramFilesX86
+        }
+        if (-not [string]::IsNullOrWhiteSpace($hostLocalAppData)) {
+            $pathParts += (Join-Path $hostLocalAppData 'Microsoft\WindowsApps')
+        }
+        Write-IsolatedSetup 'UseHostStore mode: host Microsoft Store/AppX aliases are visible; Node/npm/deps still stay isolated.'
+    }
+
+    $env:PATH = ($pathParts -join ';')
 
     $env:CODEX_OMNI_DEPS_ROOT = $DepsRoot
     $env:CODEX_OMNI_FORCE_LOCAL_NODE = '1'
     $env:CODEX_OMNI_FORCE_LOCAL_DOTNET = '1'
+    $env:CODEX_OMNI_SETUP_SOURCE_DIR = $RunRoot
+    $env:CODEX_SETUP_NO_PAUSE = '1'
 
     if ($FreshMachine) {
         $env:CODEX_OMNI_SETUP_SIMULATE_NO_CODEX = '1'
@@ -101,7 +128,27 @@ try {
     Write-IsolatedSetup "Run root: $RunRoot"
     Write-IsolatedSetup "LOCALAPPDATA: $env:LOCALAPPDATA"
     Write-IsolatedSetup "Deps root: $env:CODEX_OMNI_DEPS_ROOT"
-    Write-IsolatedSetup 'PATH is isolated, so host Node.js/npm/winget aliases are hidden from source bootstrap.'
+    if ($UseHostStore) {
+        Write-IsolatedSetup 'PATH is isolated for Node/npm, but host Store/winget aliases are exposed.'
+    } else {
+        Write-IsolatedSetup 'PATH is isolated, so host Node.js/npm/winget aliases are hidden from source bootstrap.'
+    }
+
+    if ($UseHostStore) {
+        $wingetCommand = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($wingetCommand -and -not [string]::IsNullOrWhiteSpace($wingetCommand.Source)) {
+            Write-IsolatedSetup "winget visible: $($wingetCommand.Source)"
+        } else {
+            Write-IsolatedSetup 'winget is not visible even with UseHostStore.'
+        }
+
+        $codexPackage = Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($codexPackage) {
+            Write-IsolatedSetup "OpenAI.Codex visible: $($codexPackage.PackageFullName)"
+        } else {
+            Write-IsolatedSetup 'OpenAI.Codex is not installed for this Windows user.'
+        }
+    }
 
     $args = @()
     if ($DryRun) { $args += '--dry-run' }

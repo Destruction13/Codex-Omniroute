@@ -98,12 +98,96 @@ function Install-LocalDotnetSdk {
     Write-Step "installing local .NET SDK 8.0 into $DotnetRoot"
     $psExe = Get-Command pwsh.exe -ErrorAction SilentlyContinue
     if (-not $psExe) { $psExe = Get-Command powershell.exe -ErrorAction Stop }
-    $installOutput = & $psExe.Source -NoProfile -ExecutionPolicy Bypass -File $installer -Channel 8.0 -InstallDir $DotnetRoot -NoPath 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        if (-not $Quiet -and -not $AsJson) { $installOutput | Write-Host }
-        throw "dotnet-install.ps1 failed with exit code $LASTEXITCODE"
+    $installOutput = @()
+    $installExitCode = 1
+    try {
+        $installOutput = & $psExe.Source -NoProfile -ExecutionPolicy Bypass -File $installer -Channel 8.0 -InstallDir $DotnetRoot -NoPath 2>&1
+        $installExitCode = $LASTEXITCODE
+    } catch {
+        $installOutput += $_
+        $lastExit = Get-Variable -Name LASTEXITCODE -ErrorAction SilentlyContinue
+        if ($lastExit) { $installExitCode = [int]$lastExit.Value }
     }
+    if ($installExitCode -eq 0) {
+        if (-not $Quiet -and -not $AsJson) { $installOutput | Write-Host }
+        return
+    }
+
     if (-not $Quiet -and -not $AsJson) { $installOutput | Write-Host }
+    Write-Step "dotnet-install.ps1 failed; downloading the .NET SDK archive directly"
+    Install-LocalDotnetSdkArchive -DotnetRoot $DotnetRoot -DepsRoot $DepsRoot
+}
+
+function Get-DotnetDistArch {
+    $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+    switch -Regex ([string]$arch) {
+        '^(AMD64|IA64|x64)$' { return 'x64' }
+        '^ARM64$' { return 'arm64' }
+        default { throw "Unsupported Windows architecture for local .NET SDK install: $arch" }
+    }
+}
+
+function Resolve-DotnetSdkArchive {
+    param([Parameter(Mandatory = $true)][string]$DepsRoot)
+
+    $metadataPath = Join-Path $DepsRoot 'dotnet-8-releases.json'
+    Write-Step "downloading .NET 8 release metadata"
+    Invoke-WebRequest -Uri 'https://builds.dotnet.microsoft.com/dotnet/release-metadata/8.0/releases.json' -OutFile $metadataPath -UseBasicParsing
+    $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json -ErrorAction Stop
+    $rid = "win-$(Get-DotnetDistArch)"
+    $expectedName = "dotnet-sdk-$rid.zip"
+
+    foreach ($release in $metadata.releases) {
+        $sdk = $release.sdk
+        if (-not $sdk -or [string]::IsNullOrWhiteSpace([string]$sdk.version)) { continue }
+        $file = @($sdk.files) | Where-Object {
+            $_.rid -eq $rid -and $_.name -eq $expectedName -and -not [string]::IsNullOrWhiteSpace([string]$_.url)
+        } | Select-Object -First 1
+        if ($file) {
+            return [pscustomobject]@{
+                Version = [string]$sdk.version
+                Rid = $rid
+                Url = [string]$file.url
+                Hash = [string]$file.hash
+            }
+        }
+    }
+
+    throw "Could not resolve a .NET SDK archive for $rid."
+}
+
+function Install-LocalDotnetSdkArchive {
+    param(
+        [Parameter(Mandatory = $true)][string]$DotnetRoot,
+        [Parameter(Mandatory = $true)][string]$DepsRoot
+    )
+
+    New-Item -ItemType Directory -Path $DepsRoot -Force | Out-Null
+    Assert-ChildPath -Parent $DepsRoot -Child $DotnetRoot
+
+    $archive = Resolve-DotnetSdkArchive -DepsRoot $DepsRoot
+    $archivePath = Join-Path $DepsRoot "dotnet-sdk-$($archive.Version)-$($archive.Rid).zip"
+    Assert-ChildPath -Parent $DepsRoot -Child $archivePath
+
+    Write-Step "downloading .NET SDK $($archive.Version) for $($archive.Rid)"
+    Invoke-WebRequest -Uri $archive.Url -OutFile $archivePath -UseBasicParsing
+
+    if (-not [string]::IsNullOrWhiteSpace($archive.Hash)) {
+        $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA512).Hash.ToLowerInvariant()
+        if ($actualHash -ne $archive.Hash.ToLowerInvariant()) {
+            throw ".NET SDK archive hash mismatch."
+        }
+    }
+
+    if (Test-Path -LiteralPath $DotnetRoot) {
+        Remove-Item -LiteralPath $DotnetRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $DotnetRoot -Force | Out-Null
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $DotnetRoot -Force
+
+    if (-not (Test-Path -LiteralPath (Join-Path $DotnetRoot 'dotnet.exe'))) {
+        throw ".NET SDK archive did not contain the expected dotnet.exe."
+    }
 }
 
 function Get-NodeDistArch {

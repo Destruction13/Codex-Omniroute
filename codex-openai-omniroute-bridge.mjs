@@ -86,6 +86,14 @@ const OPENCODE_AUTH_PATH = path.join(os.homedir(), ".config", "opencode", "auth.
 const OPENCODE_PROVIDER_NAMES = ["cloud_omni", "miracloud", "omniroute"];
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.CODEX_BRIDGE_REQUEST_TIMEOUT_MS || "300000", 10);
+const UPSTREAM_NETWORK_RETRIES = Math.max(
+  0,
+  parseInt(process.env.CODEX_OMNI_UPSTREAM_NETWORK_RETRIES || "2", 10),
+);
+const UPSTREAM_RETRY_BASE_DELAY_MS = Math.max(
+  0,
+  parseInt(process.env.CODEX_OMNI_UPSTREAM_RETRY_BASE_DELAY_MS || "350", 10),
+);
 const LOG_LEVEL = (process.env.CODEX_BRIDGE_LOG_LEVEL || "info").toLowerCase();
 const OMNIROUTE_MAX_BODY_BYTES = parseInt(
   process.env.CODEX_OMNI_OMNIROUTE_MAX_BODY_BYTES || String(10 * 1024 * 1024),
@@ -1759,63 +1767,96 @@ function forwardOutbound({
   responseAdapterContext = null,
 }) {
   const mod = pickHttpModule(target);
-  const upstreamReq = mod.request(
-    {
-      method,
-      hostname: target.hostname,
-      port: target.port || (target.protocol === "https:" ? 443 : 80),
-      path: target.pathname + (target.search || ""),
-      headers,
-      timeout: REQUEST_TIMEOUT_MS,
-    },
-    (upstreamRes) => {
-      clientRes.statusCode = upstreamRes.statusCode || 502;
-      for (const [k, v] of Object.entries(upstreamRes.headers)) {
-        if (HOP_BY_HOP.has(k.toLowerCase())) continue;
-        if (v != null) clientRes.setHeader(k, v);
-      }
-      if (shouldTransformBridgeResponse(responseAdapterContext)) {
-        const contentType = upstreamRes.headers["content-type"];
-        if (isSseContentType(contentType)) {
-          pipeSseWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
-        } else if (isJsonContentType(contentType)) {
-          pipeJsonWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
+
+  function isRetriableUpstreamError(err) {
+    const code = String(err?.code || "").toUpperCase();
+    const message = String(err?.message || "").toLowerCase();
+    return (
+      code === "ECONNRESET" ||
+      code === "ETIMEDOUT" ||
+      code === "EAI_AGAIN" ||
+      code === "ECONNREFUSED" ||
+      message.includes("before secure tls connection was established") ||
+      message.includes("upstream timeout")
+    );
+  }
+
+  let attempt = 0;
+  function sendAttempt() {
+    attempt += 1;
+    const upstreamReq = mod.request(
+      {
+        method,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === "https:" ? 443 : 80),
+        path: target.pathname + (target.search || ""),
+        headers,
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (upstreamRes) => {
+        clientRes.statusCode = upstreamRes.statusCode || 502;
+        for (const [k, v] of Object.entries(upstreamRes.headers)) {
+          if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+          if (v != null) clientRes.setHeader(k, v);
+        }
+        if (shouldTransformBridgeResponse(responseAdapterContext)) {
+          const contentType = upstreamRes.headers["content-type"];
+          if (isSseContentType(contentType)) {
+            pipeSseWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
+          } else if (isJsonContentType(contentType)) {
+            pipeJsonWithApplyPatchTransform(upstreamRes, clientRes, responseAdapterContext);
+          } else {
+            upstreamRes.on("data", (chunk) => clientRes.write(chunk));
+            upstreamRes.on("end", () => clientRes.end());
+          }
         } else {
           upstreamRes.on("data", (chunk) => clientRes.write(chunk));
           upstreamRes.on("end", () => clientRes.end());
         }
-      } else {
-        upstreamRes.on("data", (chunk) => clientRes.write(chunk));
-        upstreamRes.on("end", () => clientRes.end());
+        upstreamRes.on("error", (err) => {
+          log("error", "upstream response error", err?.message);
+          if (!clientRes.headersSent) {
+            clientRes.statusCode = 502;
+            clientRes.setHeader("content-type", "application/json");
+            clientRes.end(JSON.stringify({ error: "upstream_error", detail: err?.message }));
+          } else {
+            clientRes.end();
+          }
+        });
+      },
+    );
+    upstreamReq.on("timeout", () => {
+      log("warn", "upstream request timed out", target.href);
+      upstreamReq.destroy(new Error("upstream timeout"));
+    });
+    upstreamReq.on("error", (err) => {
+      if (!clientRes.headersSent && attempt <= UPSTREAM_NETWORK_RETRIES && isRetriableUpstreamError(err)) {
+        const delay = UPSTREAM_RETRY_BASE_DELAY_MS * attempt;
+        log(
+          "warn",
+          "upstream request error; retrying",
+          err?.message,
+          `attempt=${attempt}`,
+          `retry_in_ms=${delay}`,
+        );
+        setTimeout(sendAttempt, delay);
+        return;
       }
-      upstreamRes.on("error", (err) => {
-        log("error", "upstream response error", err?.message);
-        if (!clientRes.headersSent) {
-          clientRes.statusCode = 502;
-          clientRes.setHeader("content-type", "application/json");
-          clientRes.end(JSON.stringify({ error: "upstream_error", detail: err?.message }));
-        } else {
-          clientRes.end();
-        }
-      });
-    },
-  );
-  upstreamReq.on("timeout", () => {
-    log("warn", "upstream request timed out", target.href);
-    upstreamReq.destroy(new Error("upstream timeout"));
-  });
-  upstreamReq.on("error", (err) => {
-    log("error", "upstream request error", err?.message);
-    if (!clientRes.headersSent) {
-      clientRes.statusCode = 502;
-      clientRes.setHeader("content-type", "application/json");
-      clientRes.end(JSON.stringify({ error: "upstream_error", detail: err?.message }));
-    } else {
-      clientRes.end();
-    }
-  });
-  if (bodyBuf && bodyBuf.length > 0) upstreamReq.write(bodyBuf);
-  upstreamReq.end();
+
+      log("error", "upstream request error", err?.message);
+      if (!clientRes.headersSent) {
+        clientRes.statusCode = 502;
+        clientRes.setHeader("content-type", "application/json");
+        clientRes.end(JSON.stringify({ error: "upstream_error", detail: err?.message }));
+      } else {
+        clientRes.end();
+      }
+    });
+    if (bodyBuf && bodyBuf.length > 0) upstreamReq.write(bodyBuf);
+    upstreamReq.end();
+  }
+
+  sendAttempt();
 }
 
 // ----------------------------------------------------------------------------

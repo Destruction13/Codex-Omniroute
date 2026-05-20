@@ -266,7 +266,7 @@ export class SetupRunner {
       const codexBefore = await this.getCodexPackage(powerShell)
       const winget = await this.ensureWinget(
         powerShell,
-        normalized.installRecommendedTools || !codexBefore
+        !codexBefore
       )
 
       await this.ensureOfficialCodex(powerShell, winget, codexBefore)
@@ -1563,12 +1563,79 @@ async function probeOmniRouteProvider(
   validateKeyBelongsToService(provider)
   const apiManager = await probeApiManagerKey(provider)
   const modelProbe = await probeOmniRouteModels(provider)
+  await probeOmniRouteChatAuth(provider, modelProbe.matchedModel)
   return {
     ...modelProbe,
     apiManagerEndpoint: apiManager?.endpoint ?? "",
     apiManagerDetail:
       apiManager?.detail ?? "verified by protected service endpoint",
   }
+}
+
+async function probeOmniRouteChatAuth(
+  provider: ProviderConfig,
+  model: string
+): Promise<void> {
+  const endpoints = getProviderChatEndpoints(provider.base_url)
+  const body = JSON.stringify({
+    model,
+    messages: [{ role: "user", content: "Reply with exactly OK." }],
+    max_tokens: 1,
+    temperature: 0,
+  })
+  const failures: string[] = []
+  let authRejected = false
+  const headers = {
+    accept: "application/json",
+    authorization: `Bearer ${provider.api_key}`,
+    ...provider.headers,
+    "content-type": "application/json",
+  }
+
+  for (const endpoint of endpoints) {
+    let response: Response
+    try {
+      response = await fetchWithTimeout(
+        endpoint,
+        {
+          method: "POST",
+          headers,
+          body,
+        },
+        60_000
+      )
+    } catch (error) {
+      failures.push(`${endpoint}: ${toErrorMessage(error)}`)
+      continue
+    }
+
+    const text = await response.text()
+    if (response.status === 401 || response.status === 403) {
+      authRejected = true
+      failures.push(
+        `${endpoint}: HTTP ${response.status}${formatBodySnippet(text)}`
+      )
+      continue
+    }
+    if (response.ok) {
+      return
+    }
+
+    const message = extractResponseMessage(text).toLowerCase()
+    if (message.includes("invalid") && message.includes("key")) {
+      throw new Error(KEY_VERIFICATION_FAILED)
+    }
+    failures.push(
+      `${endpoint}: HTTP ${response.status}${formatBodySnippet(text)}`
+    )
+  }
+
+  if (authRejected) {
+    throw new Error(KEY_VERIFICATION_FAILED)
+  }
+  throw new Error(
+    failures.length > 0 ? SERVICE_VERIFICATION_FAILED : KEY_VERIFICATION_FAILED
+  )
 }
 
 function validateKeyBelongsToService(provider: ProviderConfig): void {
@@ -1754,6 +1821,24 @@ function getProviderModelEndpoints(baseUrl: string): string[] {
     const cleanPath = parsed.pathname.replace(/\/+$/, "")
     if (!cleanPath.toLowerCase().endsWith("/v1")) {
       parsed.pathname = `${cleanPath}/v1/models`
+      parsed.search = ""
+      parsed.hash = ""
+      endpoints.push(parsed.toString())
+    }
+  } catch {
+    // validateRequest has already parsed the URL; keep the primary endpoint.
+  }
+  return unique(endpoints)
+}
+
+function getProviderChatEndpoints(baseUrl: string): string[] {
+  const normalized = stripTrailingSlash(baseUrl)
+  const endpoints = [appendUrlPath(normalized, "chat/completions")]
+  try {
+    const parsed = new URL(normalized)
+    const cleanPath = parsed.pathname.replace(/\/+$/, "")
+    if (!cleanPath.toLowerCase().endsWith("/v1")) {
+      parsed.pathname = `${cleanPath}/v1/chat/completions`
       parsed.search = ""
       parsed.hash = ""
       endpoints.push(parsed.toString())

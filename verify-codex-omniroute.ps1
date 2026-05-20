@@ -171,17 +171,26 @@ function Get-McpServerNames {
 }
 
 function Get-BridgeHealth {
-    param([int]$PreferredPort)
+    param(
+        [int]$PreferredPort,
+        [string]$ExpectedCodexHome = ''
+    )
+
+    $firstHealthy = $null
     for ($i = 0; $i -lt 40; $i++) {
         $port = $PreferredPort + $i
         try {
             $health = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/healthz" -f $port) -TimeoutSec 2
             if ($health -and $health.ok) {
-                return [pscustomobject]@{ Port = $port; Health = $health }
+                $candidate = [pscustomobject]@{ Port = $port; Health = $health }
+                if (-not $firstHealthy) { $firstHealthy = $candidate }
+                if ([string]::IsNullOrWhiteSpace($ExpectedCodexHome) -or (Test-SamePath ([string]$health.codex_home) $ExpectedCodexHome)) {
+                    return $candidate
+                }
             }
         } catch {}
     }
-    return $null
+    return $firstHealthy
 }
 
 function Get-RuntimeOverrideArgs {
@@ -370,7 +379,7 @@ if ($launcherExit -eq 0) {
     Add-Result 'omniroute-launcher-nocodex' 'FAIL' $detail
 }
 
-$active = Get-BridgeHealth -PreferredPort $BridgePort
+$active = Get-BridgeHealth -PreferredPort $BridgePort -ExpectedCodexHome $officialHome
 if ($active) {
     Add-Result 'bridge-healthz' 'PASS' "bridge healthy on port $($active.Port)"
 } else {
@@ -431,7 +440,7 @@ if ($officialConfig -and (Test-RootOmniRouteProvider -ConfigPath $officialConfig
     Add-Result 'shared-config-no-global-provider' 'PASS' 'shared config.toml has no global OmniRoute model_provider'
 }
 
-$mcpNames = if ($officialConfig) { @(Get-McpServerNames -ConfigPath $officialConfig) } else { @() }
+$mcpNames = @(if ($officialConfig) { Get-McpServerNames -ConfigPath $officialConfig })
 if ($mcpNames.Count -gt 0) {
     Add-Result 'shared-mcp-config-visible' 'PASS' ("shared config has {0} MCP server(s): {1}" -f $mcpNames.Count, (($mcpNames | Select-Object -First 8) -join ', '))
 } else {

@@ -3,7 +3,7 @@ REM Runs the Electron setup UI from this repository without packaging Setup.exe.
 
 setlocal
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Run-Setup-Source.ps1" %*
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "& '%~dp0Run-Setup-Source.ps1' @args" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

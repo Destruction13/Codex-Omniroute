@@ -26,6 +26,29 @@ foreach ($arg in $ElectronArgs) {
 }
 $ElectronArgs = $normalizedElectronArgs
 
+$appArgumentNames = @(
+    '--headless-install',
+    '--install-dir',
+    '--base-url',
+    '--api-key',
+    '--repo-branch',
+    '--skip-recommended',
+    '--skip-shortcuts',
+    '--no-launch'
+)
+if ($ElectronArgs.Count -gt 0 -and $ElectronArgs[0] -ne '--') {
+    $hasAppArguments = $false
+    foreach ($arg in $ElectronArgs) {
+        if ($appArgumentNames -contains $arg) {
+            $hasAppArguments = $true
+            break
+        }
+    }
+    if ($hasAppArguments) {
+        $ElectronArgs = @('--') + $ElectronArgs
+    }
+}
+
 function Write-Setup {
     param([string]$Message)
     Write-Host "[setup] $Message"
